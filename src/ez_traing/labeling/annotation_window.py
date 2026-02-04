@@ -209,7 +209,7 @@ def _apply_fluent_stylesheet(widget):
 #fluentAnnotationWindow #labelDockContainer,
 #fluentAnnotationWindow #fileDockContainer {{
     background-color: transparent;
-    font-size: 10px;
+    font-size: 9px;
 }}
 #fluentAnnotationWindow QFrame#panelSeparator {{
     background-color: #E3E3E3;
@@ -232,9 +232,9 @@ def _apply_fluent_stylesheet(widget):
 }}
 #fluentAnnotationWindow #labelDockContainer QListWidget::item,
 #fluentAnnotationWindow #fileDockContainer QListWidget::item {{
-    padding: 4px 8px;
-    margin: 1px 2px;
-    font-size: 12px;
+    padding: 2px 6px;
+    margin: 0 2px;
+    font-size: 11px;
 }}
 #fluentAnnotationWindow QListWidget::item:hover {{
     background-color: #F5F7FA;
@@ -648,7 +648,7 @@ class AnnotationWindow(labelimg_module.MainWindow):
         for list_widget in (getattr(self, "label_list", None), getattr(self, "file_list_widget", None)):
             if list_widget is None:
                 continue
-            list_widget.setSpacing(2)
+            list_widget.setSpacing(1)
 
     def _apply_dock_title_bar(self, dock, show_float=False):
         title_bar = QWidget(dock)
