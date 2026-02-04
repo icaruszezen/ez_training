@@ -4,18 +4,16 @@ import sys
 import types
 from pathlib import Path
 
-from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QColor, QIcon, QPalette
+from PyQt5.QtCore import Qt, QRect, QSize, QEvent
+from PyQt5.QtGui import QColor, QIcon, QPainter, QPalette
 from PyQt5.QtWidgets import (
     QAction,
     QDialog,
     QDockWidget,
     QHBoxLayout,
-    QInputDialog,
     QLabel,
-    QListWidget,
-    QListWidgetItem,
     QMessageBox,
+    QPlainTextEdit,
     QPushButton,
     QStyle,
     QToolButton,
@@ -351,33 +349,31 @@ PredefinedLabelsDialog {
     border-radius: 8px;
 }
 PredefinedLabelsDialog QLabel#titleLabel {
-    font-size: 18px;
+    font-size: 22px;
     font-weight: 600;
     color: #1A1A1A;
     padding: 4px 0;
 }
-PredefinedLabelsDialog QListWidget {
+PredefinedLabelsDialog QLabel#pathLabel {
+    color: #6B6B6B;
+    font-size: 14px;
+    padding: 0;
+}
+PredefinedLabelsDialog QLabel#hintLabel {
+    color: #6B6B6B;
+    font-size: 14px;
+    padding: 0;
+}
+PredefinedLabelsDialog QPlainTextEdit {
     background-color: #FFFFFF;
     border: 1px solid #E5E5E5;
     border-radius: 6px;
-    padding: 4px;
+    padding: 8px;
     outline: none;
+    font-size: 18px;
 }
-PredefinedLabelsDialog QListWidget::item {
-    padding: 10px 12px;
-    border-radius: 4px;
-    color: #1A1A1A;
-    margin: 2px 4px;
-}
-PredefinedLabelsDialog QListWidget::item:hover {
-    background-color: #F5F5F5;
-}
-PredefinedLabelsDialog QListWidget::item:selected {
-    background-color: #E5F1FB;
-    color: #1A1A1A;
-}
-PredefinedLabelsDialog QListWidget::item:selected:hover {
-    background-color: #CCE4F7;
+PredefinedLabelsDialog QPlainTextEdit:focus {
+    border-color: #90C4F0;
 }
 PredefinedLabelsDialog QPushButton {
     background-color: #FFFFFF;
@@ -423,16 +419,99 @@ PredefinedLabelsDialog QPushButton#dangerBtn:pressed {
 """
 
 
+class LineNumberArea(QWidget):
+    def __init__(self, editor):
+        super().__init__(editor)
+        self._editor = editor
+
+    def sizeHint(self):
+        return QSize(self._editor.line_number_area_width(), 0)
+
+    def paintEvent(self, event):
+        self._editor.line_number_area_paint_event(event)
+
+
+class LineNumberTextEdit(QPlainTextEdit):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._line_number_area = LineNumberArea(self)
+        self._line_number_area.setFont(self.font())
+
+        self.blockCountChanged.connect(self._update_line_number_area_width)
+        self.updateRequest.connect(self._update_line_number_area)
+        self._update_line_number_area_width(0)
+
+    def line_number_area_width(self):
+        digits = len(str(max(0, self.blockCount() - 1)))
+        space = 6 + self.fontMetrics().horizontalAdvance("9") * digits
+        return space
+
+    def _update_line_number_area_width(self, _):
+        self.setViewportMargins(self.line_number_area_width(), 0, 0, 0)
+
+    def _update_line_number_area(self, rect, dy):
+        if dy:
+            self._line_number_area.scroll(0, dy)
+        else:
+            self._line_number_area.update(0, rect.y(), self._line_number_area.width(), rect.height())
+
+        if rect.contains(self.viewport().rect()):
+            self._update_line_number_area_width(0)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        content_rect = self.contentsRect()
+        self._line_number_area.setGeometry(
+            QRect(content_rect.left(), content_rect.top(), self.line_number_area_width(), content_rect.height())
+        )
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() == QEvent.FontChange:
+            self._line_number_area.setFont(self.font())
+            self._update_line_number_area_width(0)
+            self._line_number_area.update()
+
+    def line_number_area_paint_event(self, event):
+        painter = QPainter(self._line_number_area)
+        painter.setFont(self.font())
+        painter.fillRect(event.rect(), self.palette().alternateBase())
+
+        block = self.firstVisibleBlock()
+        block_number = block.blockNumber()
+        top = self.blockBoundingGeometry(block).translated(self.contentOffset()).top()
+        bottom = top + self.blockBoundingRect(block).height()
+
+        text_color = self.palette().color(QPalette.Disabled, QPalette.Text)
+        while block.isValid() and top <= event.rect().bottom():
+            if block.isVisible() and bottom >= event.rect().top():
+                number = str(block_number)
+                painter.setPen(text_color)
+                painter.drawText(
+                    0,
+                    int(top),
+                    self._line_number_area.width() - 4,
+                    int(self.fontMetrics().height()),
+                    Qt.AlignRight,
+                    number,
+                )
+            block = block.next()
+            top = bottom
+            bottom = top + self.blockBoundingRect(block).height()
+            block_number += 1
+
+
 class PredefinedLabelsDialog(QDialog):
-    """预设标签编辑对话框"""
+    """预设标签编辑对话框（直接编辑txt文件）"""
 
     def __init__(self, parent, labels, classes_file):
         super().__init__(parent)
         self.setWindowTitle("编辑预设标签")
         self.setMinimumSize(360, 450)
-        self._labels = labels.copy()
+        self._labels = labels.copy() if labels else []
         self._classes_file = classes_file
         self._setup_ui()
+        self._load_text()
 
     def _setup_ui(self):
         # 应用Fluent样式
@@ -443,37 +522,24 @@ class PredefinedLabelsDialog(QDialog):
         layout.setSpacing(16)
 
         # 标题
-        from PyQt5.QtWidgets import QLabel
         title_label = QLabel("编辑预设标签")
         title_label.setObjectName("titleLabel")
         layout.addWidget(title_label)
 
-        # 标签列表
-        self._list = QListWidget()
-        self._list.setDragDropMode(QListWidget.InternalMove)
-        self._list.itemDoubleClicked.connect(self._edit_item)
-        self._refresh_list()
-        layout.addWidget(self._list)
+        # 文件路径与说明
+        path_label = QLabel(f"文件: {self._classes_file}")
+        path_label.setObjectName("pathLabel")
+        path_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        layout.addWidget(path_label)
 
-        # 按钮栏
-        btn_layout = QHBoxLayout()
-        btn_layout.setSpacing(8)
+        hint_label = QLabel("每行一个标签，保存会直接写入txt文件")
+        hint_label.setObjectName("hintLabel")
+        layout.addWidget(hint_label)
 
-        add_btn = QPushButton("添加")
-        add_btn.clicked.connect(self._add_label)
-        btn_layout.addWidget(add_btn)
-
-        edit_btn = QPushButton("编辑")
-        edit_btn.clicked.connect(self._edit_selected)
-        btn_layout.addWidget(edit_btn)
-
-        delete_btn = QPushButton("删除")
-        delete_btn.setObjectName("dangerBtn")
-        delete_btn.clicked.connect(self._delete_label)
-        btn_layout.addWidget(delete_btn)
-
-        btn_layout.addStretch()
-        layout.addLayout(btn_layout)
+        # 文本编辑区
+        self._text_edit = LineNumberTextEdit()
+        self._text_edit.setPlaceholderText("例如：\ncat\ndog")
+        layout.addWidget(self._text_edit, 1)
 
         # 分隔线
         separator = QWidget()
@@ -497,71 +563,38 @@ class PredefinedLabelsDialog(QDialog):
 
         layout.addLayout(bottom_layout)
 
-    def _refresh_list(self):
-        self._list.clear()
-        for label in self._labels:
-            item = QListWidgetItem(label)
-            item.setFlags(item.flags() | Qt.ItemIsEditable)
-            self._list.addItem(item)
+    def _load_text(self):
+        content = ""
+        loaded_from_file = False
+        if self._classes_file and os.path.exists(self._classes_file):
+            try:
+                with open(self._classes_file, "r", encoding="utf-8") as f:
+                    content = f.read()
+                loaded_from_file = True
+            except Exception as e:
+                QMessageBox.warning(self, "提示", f"读取失败: {e}")
+        if not loaded_from_file and self._labels:
+            content = "\n".join(self._labels)
+        self._text_edit.setPlainText(content)
 
-    def _add_label(self):
-        text, ok = QInputDialog.getText(self, "添加标签", "请输入新标签名称:")
-        if ok and text.strip():
-            label = text.strip()
-            if label not in self._labels:
-                self._labels.append(label)
-                self._refresh_list()
-            else:
-                QMessageBox.warning(self, "提示", f"标签 '{label}' 已存在")
-
-    def _edit_item(self, item):
-        old_label = item.text()
-        text, ok = QInputDialog.getText(self, "编辑标签", "请输入新标签名称:", text=old_label)
-        if ok and text.strip():
-            new_label = text.strip()
-            if new_label != old_label:
-                if new_label in self._labels:
-                    QMessageBox.warning(self, "提示", f"标签 '{new_label}' 已存在")
-                    return
-                idx = self._labels.index(old_label)
-                self._labels[idx] = new_label
-                self._refresh_list()
-
-    def _edit_selected(self):
-        item = self._list.currentItem()
-        if item:
-            self._edit_item(item)
-        else:
-            QMessageBox.information(self, "提示", "请先选择一个标签")
-
-    def _delete_label(self):
-        item = self._list.currentItem()
-        if item:
-            label = item.text()
-            reply = QMessageBox.question(
-                self, "确认删除", f"确定要删除标签 '{label}' 吗？",
-                QMessageBox.Yes | QMessageBox.No, QMessageBox.No
-            )
-            if reply == QMessageBox.Yes:
-                self._labels.remove(label)
-                self._refresh_list()
-        else:
-            QMessageBox.information(self, "提示", "请先选择一个标签")
+    @staticmethod
+    def _parse_labels(text):
+        labels = []
+        for line in text.splitlines():
+            label = line.strip()
+            if label and label not in labels:
+                labels.append(label)
+        return labels
 
     def _save_and_close(self):
-        # 从列表中更新顺序（支持拖拽排序）
-        new_labels = []
-        for i in range(self._list.count()):
-            item = self._list.item(i)
-            label = item.text().strip()
-            if label and label not in new_labels:
-                new_labels.append(label)
-        self._labels = new_labels
-
+        content = self._text_edit.toPlainText()
         try:
+            parent_dir = os.path.dirname(self._classes_file)
+            if parent_dir and not os.path.exists(parent_dir):
+                os.makedirs(parent_dir, exist_ok=True)
             with open(self._classes_file, "w", encoding="utf-8") as f:
-                for label in self._labels:
-                    f.write(f"{label}\n")
+                f.write(content)
+            self._labels = self._parse_labels(content)
             self.accept()
         except Exception as e:
             QMessageBox.critical(self, "错误", f"保存失败: {e}")
