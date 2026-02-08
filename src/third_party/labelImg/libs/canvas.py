@@ -467,7 +467,8 @@ class Canvas(QWidget):
         if self.selected_shape:
             shape = self.selected_shape
             self.un_highlight(shape)
-            self.shapes.remove(self.selected_shape)
+            if self.selected_shape in self.shapes:
+                self.shapes.remove(self.selected_shape)
             self.selected_shape = None
             self.update()
             return shape

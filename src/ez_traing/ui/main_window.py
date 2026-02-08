@@ -6,6 +6,8 @@ from qfluentwidgets import FluentWindow, NavigationItemPosition
 from ez_traing.pages.annotation_page import AnnotationPage
 from ez_traing.pages.dataset_page import DatasetPage
 from ez_traing.pages.placeholder_page import PlaceholderPage
+from ez_traing.pages.settings_page import SettingsPage
+from ez_traing.pages.train_page import TrainPage
 
 
 class AppWindow(FluentWindow):
@@ -16,13 +18,15 @@ class AppWindow(FluentWindow):
 
         self.annotation_page = AnnotationPage(self)
         self.dataset_page = DatasetPage(self)
-        self.train_page = PlaceholderPage("YOLO 训练", "页面预留，后续开发。", self)
+        self.train_page = TrainPage(self)
         self.eval_page = PlaceholderPage("模型验证", "页面预留，后续开发。", self)
+        self.settings_page = SettingsPage(self)
 
         self.annotation_page.setObjectName("annotation")
         self.dataset_page.setObjectName("dataset")
         self.train_page.setObjectName("train")
         self.eval_page.setObjectName("eval")
+        self.settings_page.setObjectName("settings")
 
         self.addSubInterface(self.annotation_page, FIF.PHOTO, "标注")
         self.addSubInterface(self.dataset_page, FIF.FOLDER, "数据集")
@@ -31,6 +35,12 @@ class AppWindow(FluentWindow):
             self.eval_page,
             FIF.COMPLETED,
             "验证",
+            NavigationItemPosition.BOTTOM,
+        )
+        self.addSubInterface(
+            self.settings_page,
+            FIF.SETTING,
+            "设置",
             NavigationItemPosition.BOTTOM,
         )
 
