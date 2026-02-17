@@ -35,9 +35,9 @@ class AppWindow(FluentWindow):
         self.settings_page.setObjectName("settings")
 
         self.addSubInterface(self.dataset_page, FIF.FOLDER, "数据集")
-        self.addSubInterface(self.data_prep_page, FIF.DOCUMENT, "数据准备")
         self.addSubInterface(self.prelabeling_page, FIF.TAG, "预标注")
         self.addSubInterface(self.annotation_page, FIF.PHOTO, "标注")
+        self.addSubInterface(self.data_prep_page, FIF.DOCUMENT, "数据准备")
         self.addSubInterface(self.train_page, FIF.ROBOT, "训练")
         self.addSubInterface(self.eval_page, FIF.COMPLETED, "验证")
         self.addSubInterface(

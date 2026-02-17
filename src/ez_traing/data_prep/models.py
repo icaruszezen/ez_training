@@ -36,6 +36,7 @@ class DataPrepConfig:
     random_seed: int = 42
     augment_methods: List[str] = field(default_factory=list)
     augment_times: int = 1
+    augment_workers: int = 0  # 0 表示自动按 CPU 与增强次数决定
     augment_scope: str = "train"  # train | both
     skip_unlabeled: bool = True
     overwrite_output: bool = True
@@ -53,6 +54,8 @@ class DataPrepConfig:
             raise ValueError("增强范围必须是 train 或 both")
         if self.augment_times < 0:
             raise ValueError("增强次数不能为负数")
+        if self.augment_workers < 0:
+            raise ValueError("增强线程数不能为负数")
 
 
 @dataclass

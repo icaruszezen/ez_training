@@ -75,6 +75,26 @@ class DataPrepWorker(QThread):
 class DataPrepPage(QWidget):
     """训练前数据准备页面。"""
 
+    _AUGMENTATION_HELP_TEXTS: Dict[str, str] = {
+        "hflip": "作用：左右翻转，提升模型对目标左右朝向变化的鲁棒性。\n建议场景：目标本身左右对称或方向不敏感（如通用工业件、自然物体）。",
+        "vflip": "作用：上下翻转，扩展垂直方向姿态分布。\n建议场景：拍摄方向可能颠倒或上下方向不重要时使用；若任务对上下方向敏感请谨慎开启。",
+        "rotate": "作用：随机小角度旋转，增强模型对相机倾斜和目标轻微转动的适应能力。\n建议场景：手持拍摄、安装角度不稳定或目标有旋转变化。",
+        "shift_scale_rotate": "作用：联合平移/缩放/旋转，模拟真实拍摄中的构图和尺度扰动。\n建议场景：目标在画面中的位置和大小变化较大时。",
+        "affine": "作用：仿射几何变换（缩放、平移等），提高几何扰动下的泛化。\n建议场景：镜头角度变化不大，但存在轻微形变或视角偏移。",
+        "perspective": "作用：透视变换，模拟视角变化导致的近大远小和梯形畸变。\n建议场景：斜拍、广角或相机位置变化明显的场景。",
+        "random_resized_crop": "作用：随机裁剪并缩放，强化局部特征学习并提升不同目标尺度的适配能力。\n建议场景：目标可能只占图像局部区域，或需要提升小目标/局部目标识别能力。",
+        "brightness_contrast": "作用：调整亮度与对比度，增强对光照变化和曝光差异的鲁棒性。\n建议场景：白天/夜晚、阴影、逆光、不同曝光条件并存的数据。",
+        "hsv": "作用：扰动色相、饱和度与明度，降低模型对颜色分布偏移的敏感性。\n建议场景：不同相机、白平衡或环境光导致颜色变化明显时。",
+        "rgb_shift": "作用：分别偏移 RGB 通道，模拟传感器与色彩响应差异。\n建议场景：多设备采集、跨相机部署或颜色漂移问题较突出时。",
+        "clahe": "作用：局部对比度增强，突出暗部细节和纹理。\n建议场景：低照度、雾感、对比度偏低且细节不清的图像。",
+        "gamma": "作用：Gamma 变换，模拟不同亮度响应曲线。\n建议场景：图像整体偏暗/偏亮，或存在不同相机成像风格时。",
+        "gaussian_blur": "作用：高斯模糊，模拟轻微失焦与成像平滑。\n建议场景：拍摄可能轻微虚焦、细节偶有模糊。",
+        "motion_blur": "作用：运动模糊，模拟拍摄或目标移动造成的拖影。\n建议场景：运动场景、快门较慢或设备抖动导致模糊。",
+        "gauss_noise": "作用：添加高斯噪声，提升对传感器噪声和压缩噪声的鲁棒性。\n建议场景：弱光高 ISO、设备噪声较大或图像压缩较重。",
+        "median_blur": "作用：中值模糊，可抑制椒盐噪声并保留部分边缘结构。\n建议场景：存在离散噪点、脉冲噪声或压缩伪影。",
+        "coarse_dropout": "作用：随机遮挡图像局部区域，提升被遮挡情况下的识别能力。\n建议场景：目标经常被遮挡、重叠或视野不完整。",
+    }
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._project_manager = None
@@ -201,6 +221,7 @@ class DataPrepPage(QWidget):
         layout.addLayout(scope_layout)
 
         layout.addWidget(CaptionLabel("可多选增强方法（越多越强，但耗时更长）", card))
+        layout.addWidget(CaptionLabel("点击每个方法后的 ? 可查看作用和适用场景", card))
 
         self.aug_methods_container = QWidget(card)
         methods_layout = QGridLayout(self.aug_methods_container)
@@ -210,11 +231,27 @@ class DataPrepPage(QWidget):
 
         specs = get_augmentation_specs()
         for i, (key, display_name) in enumerate(specs):
-            cb = CheckBox(display_name, self.aug_methods_container)
+            method_row = QWidget(self.aug_methods_container)
+            method_row_layout = QHBoxLayout(method_row)
+            method_row_layout.setContentsMargins(0, 0, 0, 0)
+            method_row_layout.setSpacing(4)
+
+            cb = CheckBox(display_name, method_row)
             cb.setChecked(key in {"hflip", "brightness_contrast", "gauss_noise"})
+            method_row_layout.addWidget(cb)
+
+            help_btn = PushButton("?", method_row)
+            help_btn.setFixedSize(24, 24)
+            help_btn.setToolTip(self._AUGMENTATION_HELP_TEXTS.get(key, "暂无说明"))
+            help_btn.clicked.connect(
+                lambda _, k=key, n=display_name: self._show_aug_method_help(k, n)
+            )
+            method_row_layout.addWidget(help_btn)
+            method_row_layout.addStretch()
+
             row = i // 3
             col = i % 3
-            methods_layout.addWidget(cb, row, col)
+            methods_layout.addWidget(method_row, row, col)
             self._method_checkboxes[key] = cb
         layout.addWidget(self.aug_methods_container)
 
@@ -380,6 +417,19 @@ class DataPrepPage(QWidget):
     def _update_aug_hint(self):
         selected = len(self._selected_methods())
         self.aug_hint_label.setText(f"当前已选择 {selected} 种增强方法")
+
+    def _show_aug_method_help(self, method_key: str, display_name: str):
+        detail = self._AUGMENTATION_HELP_TEXTS.get(
+            method_key,
+            "作用：用于提升模型对该类变化的鲁棒性。\n建议场景：当真实数据中存在对应扰动时可启用。",
+        )
+        InfoBar.info(
+            title=display_name,
+            content=detail,
+            parent=self.window(),
+            position=InfoBarPosition.TOP,
+            duration=8000,
+        )
 
     def _selected_methods(self) -> List[str]:
         return [key for key, cb in self._method_checkboxes.items() if cb.isChecked()]

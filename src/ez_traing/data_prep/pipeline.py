@@ -1,9 +1,11 @@
 """训练前数据准备主流程。"""
 
+from concurrent.futures import ThreadPoolExecutor
 import os
 import re
 import shutil
 from pathlib import Path
+from threading import local
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
 import numpy as np
@@ -69,13 +71,17 @@ class DataPrepPipeline:
         )
 
         augmenter = None
+        augment_workers = 1
         aug_enabled = bool(self.config.augment_methods) and self.config.augment_times > 0
         if aug_enabled:
             augmenter = build_augmenter(self.config.augment_methods)
+            if augmenter is not None:
+                augment_workers = self._resolve_augment_workers()
             self._log(
                 log_callback,
                 f"启用增强: {', '.join(self.config.augment_methods)} x{self.config.augment_times}",
             )
+            self._log(log_callback, f"增强线程数: {augment_workers}")
 
         total_steps = self._estimate_total_steps(len(train_samples), len(val_samples), aug_enabled)
         done_steps = 0
@@ -105,6 +111,7 @@ class DataPrepPipeline:
             progress_callback=progress_callback,
             log_callback=log_callback,
             is_cancelled=is_cancelled,
+            augment_workers=augment_workers,
         )
 
         val_images, val_aug_count, done_steps = self._export_split(
@@ -121,6 +128,7 @@ class DataPrepPipeline:
             progress_callback=progress_callback,
             log_callback=log_callback,
             is_cancelled=is_cancelled,
+            augment_workers=augment_workers,
         )
         summary.val_images = val_images
         summary.augmented_images += val_aug_count
@@ -224,6 +232,12 @@ class DataPrepPipeline:
             aug_target += val_count
         return max(base + aug_target * self.config.augment_times, 1)
 
+    def _resolve_augment_workers(self) -> int:
+        workers = self.config.augment_workers
+        if workers <= 0:
+            workers = os.cpu_count() or 1
+        return max(1, min(workers, self.config.augment_times))
+
     def _export_split(
         self,
         split_name: str,
@@ -239,69 +253,119 @@ class DataPrepPipeline:
         progress_callback: Optional[Callable[[int, str], None]],
         log_callback: Optional[Callable[[str], None]],
         is_cancelled: Optional[Callable[[], bool]],
+        augment_workers: int = 1,
     ) -> Tuple[int, int, int]:
         output_count = 0
         aug_count = 0
+        executor: Optional[ThreadPoolExecutor] = None
+        thread_state = None
+        if augmenter is not None and augment_workers > 1:
+            executor = ThreadPoolExecutor(max_workers=augment_workers)
+            thread_state = local()
 
-        for sample in samples:
-            if is_cancelled and is_cancelled():
-                raise RuntimeError("任务已取消")
-
-            with Image.open(sample.image_path) as pil_img:
-                image = pil_img.convert("RGB")
-                image_array = np.array(image)
-                width, height = image.size
-
-            base_stem = self._unique_stem(
-                self._make_stem(sample.image_path, dataset_root), used_names
-            )
-            base_ext = sample.image_path.suffix.lower()
-            if base_ext not in SUPPORTED_IMAGE_FORMATS:
-                base_ext = ".jpg"
-
-            out_img = image_dir / f"{base_stem}{base_ext}"
-            out_lbl = label_dir / f"{base_stem}.txt"
-            image.save(out_img)
-            write_yolo_label(out_lbl, sample.boxes, class_to_id, width, height)
-            output_count += 1
-
-            progress_done += 1
-            self._emit_progress(
-                progress_callback,
-                int(progress_done / progress_total * 100),
-                f"{split_name}: {output_count} 张",
-            )
-
-            if augmenter is None:
-                continue
-
-            for idx in range(self.config.augment_times):
+        try:
+            for sample in samples:
                 if is_cancelled and is_cancelled():
                     raise RuntimeError("任务已取消")
 
-                aug_image, aug_boxes = apply_augmentation(image_array, sample.boxes, augmenter)
-                if sample.boxes and not aug_boxes:
-                    progress_done += 1
-                    continue
+                with Image.open(sample.image_path) as pil_img:
+                    image = pil_img.convert("RGB")
+                    image_array = np.array(image)
+                    width, height = image.size
 
-                aug_stem = self._unique_stem(f"{base_stem}_aug{idx + 1}", used_names)
-                aug_img_path = image_dir / f"{aug_stem}.jpg"
-                aug_lbl_path = label_dir / f"{aug_stem}.txt"
-                Image.fromarray(aug_image).save(aug_img_path)
-                h, w = aug_image.shape[:2]
-                write_yolo_label(aug_lbl_path, aug_boxes, class_to_id, w, h)
+                base_stem = self._unique_stem(
+                    self._make_stem(sample.image_path, dataset_root), used_names
+                )
+                base_ext = sample.image_path.suffix.lower()
+                if base_ext not in SUPPORTED_IMAGE_FORMATS:
+                    base_ext = ".jpg"
 
+                out_img = image_dir / f"{base_stem}{base_ext}"
+                out_lbl = label_dir / f"{base_stem}.txt"
+                image.save(out_img)
+                write_yolo_label(out_lbl, sample.boxes, class_to_id, width, height)
                 output_count += 1
-                aug_count += 1
+
                 progress_done += 1
                 self._emit_progress(
                     progress_callback,
                     int(progress_done / progress_total * 100),
-                    f"{split_name}: 增强 {aug_count} 张",
+                    f"{split_name}: {output_count} 张",
                 )
+
+                if augmenter is None:
+                    continue
+
+                if executor is not None and thread_state is not None:
+                    augmented_items = self._augment_image_parallel(
+                        image_array=image_array,
+                        boxes=sample.boxes,
+                        executor=executor,
+                        thread_state=thread_state,
+                        is_cancelled=is_cancelled,
+                    )
+                else:
+                    augmented_items = []
+                    for _ in range(self.config.augment_times):
+                        if is_cancelled and is_cancelled():
+                            raise RuntimeError("任务已取消")
+                        augmented_items.append(
+                            apply_augmentation(image_array, sample.boxes, augmenter)
+                        )
+
+                for idx, (aug_image, aug_boxes) in enumerate(augmented_items):
+                    if sample.boxes and not aug_boxes:
+                        progress_done += 1
+                        continue
+
+                    aug_stem = self._unique_stem(f"{base_stem}_aug{idx + 1}", used_names)
+                    aug_img_path = image_dir / f"{aug_stem}.jpg"
+                    aug_lbl_path = label_dir / f"{aug_stem}.txt"
+                    Image.fromarray(aug_image).save(aug_img_path)
+                    h, w = aug_image.shape[:2]
+                    write_yolo_label(aug_lbl_path, aug_boxes, class_to_id, w, h)
+
+                    output_count += 1
+                    aug_count += 1
+                    progress_done += 1
+                    self._emit_progress(
+                        progress_callback,
+                        int(progress_done / progress_total * 100),
+                        f"{split_name}: 增强 {aug_count} 张",
+                    )
+        finally:
+            if executor is not None:
+                executor.shutdown(wait=True)
 
         self._log(log_callback, f"{split_name} 导出完成: {output_count} 张")
         return output_count, aug_count, progress_done
+
+    def _augment_image_parallel(
+        self,
+        image_array: np.ndarray,
+        boxes: List,
+        executor: ThreadPoolExecutor,
+        thread_state,
+        is_cancelled: Optional[Callable[[], bool]],
+    ) -> List[Tuple[np.ndarray, List]]:
+        def _worker() -> Tuple[np.ndarray, List]:
+            local_augmenter = getattr(thread_state, "augmenter", None)
+            if local_augmenter is None:
+                local_augmenter = build_augmenter(self.config.augment_methods)
+                if local_augmenter is None:
+                    raise RuntimeError("增强器构建失败，请检查增强方法配置")
+                thread_state.augmenter = local_augmenter
+            return apply_augmentation(image_array, boxes, local_augmenter)
+
+        futures = [executor.submit(_worker) for _ in range(self.config.augment_times)]
+        results: List[Tuple[np.ndarray, List]] = []
+        for f in futures:
+            if is_cancelled and is_cancelled():
+                for pending in futures:
+                    pending.cancel()
+                raise RuntimeError("任务已取消")
+            results.append(f.result())
+        return results
 
     def _make_stem(self, image_path: Path, dataset_root: Path) -> str:
         try:
