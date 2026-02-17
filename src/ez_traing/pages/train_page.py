@@ -40,19 +40,21 @@ from qfluentwidgets import (
     InfoBar,
     InfoBarPosition,
     ComboBox,
+    LineEdit,
     SpinBox,
     ProgressBar,
 )
-
-# 从 dataset_page 导入 ProjectManager
-from ez_traing.pages.dataset_page import ProjectManager, DatasetProject
-
 
 def _get_config_dir() -> Path:
     """获取配置目录"""
     config_dir = Path.home() / ".ez_traing"
     config_dir.mkdir(parents=True, exist_ok=True)
     return config_dir
+
+
+def _get_default_train_folder() -> str:
+    """获取数据准备页面默认训练目录"""
+    return str(Path.home() / ".ez_traing" / "prepared_dataset")
 
 
 def _detect_devices() -> List[tuple]:
@@ -188,10 +190,9 @@ class ConfigPanel(CardWidget):
     
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._project_manager = ProjectManager()
         self._is_training = False
+        self._train_folder = _get_default_train_folder()
         self._init_ui()
-        self._refresh_datasets()
     
     def _init_ui(self):
         layout = QVBoxLayout(self)
@@ -202,16 +203,26 @@ class ConfigPanel(CardWidget):
         title = SubtitleLabel("训练配置", self)
         layout.addWidget(title)
         
-        # 数据集选择
-        layout.addWidget(StrongBodyLabel("数据集", self))
-        self.dataset_combo = ComboBox(self)
-        self.dataset_combo.setMinimumWidth(200)
-        layout.addWidget(self.dataset_combo)
+        # 训练文件夹选择（来自数据准备页面输出）
+        layout.addWidget(StrongBodyLabel("训练文件夹", self))
+        train_folder_layout = QHBoxLayout()
+        self.train_folder_edit = LineEdit(self)
+        self.train_folder_edit.setReadOnly(True)
+        self.train_folder_edit.setPlaceholderText("请选择数据准备页面输出的训练文件夹")
+        self.train_folder_edit.setText(self._train_folder)
+        train_folder_layout.addWidget(self.train_folder_edit, 1)
         
-        # 刷新数据集按钮
-        refresh_btn = TransparentPushButton("刷新数据集列表", self)
-        refresh_btn.clicked.connect(self._refresh_datasets)
-        layout.addWidget(refresh_btn)
+        self.browse_train_folder_btn = PushButton("浏览", self)
+        self.browse_train_folder_btn.setIcon(FIF.FOLDER)
+        self.browse_train_folder_btn.clicked.connect(self._browse_train_folder)
+        train_folder_layout.addWidget(self.browse_train_folder_btn)
+        layout.addLayout(train_folder_layout)
+        
+        self.train_folder_hint = CaptionLabel(
+            "需选择包含 data.yaml 的训练目录（由“训练前数据准备”页面生成）", self
+        )
+        self.train_folder_hint.setWordWrap(True)
+        layout.addWidget(self.train_folder_hint)
         
         # 模型选择
         layout.addWidget(StrongBodyLabel("模型", self))
@@ -298,13 +309,15 @@ class ConfigPanel(CardWidget):
         for device_id, display_name in devices:
             self.device_combo.addItem(display_name, device_id)
     
-    def _refresh_datasets(self):
-        """刷新数据集列表"""
-        self._project_manager = ProjectManager()
-        self.dataset_combo.clear()
-        projects = self._project_manager.get_all_projects()
-        for proj in projects:
-            self.dataset_combo.addItem(proj.name, proj.id)
+    def _browse_train_folder(self):
+        """选择训练文件夹"""
+        current = self.train_folder_edit.text().strip() or self._train_folder
+        dir_path = QFileDialog.getExistingDirectory(
+            self, "选择训练文件夹", current
+        )
+        if dir_path:
+            self._train_folder = dir_path
+            self.train_folder_edit.setText(dir_path)
     
     def _browse_output_dir(self):
         """选择输出目录"""
@@ -317,28 +330,39 @@ class ConfigPanel(CardWidget):
     
     def _on_start_clicked(self):
         """开始训练"""
-        if self.dataset_combo.currentIndex() < 0:
+        train_folder = self.train_folder_edit.text().strip()
+        if not train_folder:
             InfoBar.warning(
                 title="提示",
-                content="请先选择数据集",
+                content="请先选择训练文件夹",
                 parent=self.window(),
                 position=InfoBarPosition.TOP,
             )
             return
-        
-        project_id = self.dataset_combo.currentData()
-        project = self._project_manager.get_project(project_id)
-        if not project:
+
+        train_dir = Path(train_folder)
+        if not train_dir.exists() or not train_dir.is_dir():
             InfoBar.error(
                 title="错误",
-                content="数据集不存在",
+                content=f"训练文件夹不存在: {train_folder}",
+                parent=self.window(),
+                position=InfoBarPosition.TOP,
+            )
+            return
+
+        if not (train_dir / "data.yaml").exists():
+            InfoBar.error(
+                title="错误",
+                content="训练文件夹中缺少 data.yaml，请先在“训练前数据准备”页面生成数据",
                 parent=self.window(),
                 position=InfoBarPosition.TOP,
             )
             return
         
+        train_name = re.sub(r"[^\w\-]+", "_", train_dir.name).strip("_") or "train_dataset"
         config = {
-            "project": project,
+            "train_folder": str(train_dir),
+            "train_name": train_name,
             "model": self.model_combo.currentText(),
             "epochs": self.epochs_spin.value(),
             "batch_size": self.batch_spin.value(),
@@ -358,7 +382,8 @@ class ConfigPanel(CardWidget):
         self._is_training = is_training
         self.start_btn.setEnabled(not is_training)
         self.stop_btn.setEnabled(is_training)
-        self.dataset_combo.setEnabled(not is_training)
+        self.train_folder_edit.setEnabled(not is_training)
+        self.browse_train_folder_btn.setEnabled(not is_training)
         self.model_combo.setEnabled(not is_training)
         self.epochs_spin.setEnabled(not is_training)
         self.batch_spin.setEnabled(not is_training)
@@ -622,80 +647,36 @@ class TrainPage(QWidget):
         self.config_panel.start_training.connect(self._start_training)
         self.config_panel.stop_training.connect(self._stop_training)
     
-    def _generate_data_yaml(self, project: DatasetProject, output_dir: str) -> str:
-        """生成数据集 YAML 配置文件"""
-        dataset_dir = Path(project.directory)
-        
-        # 查找 classes.txt
-        classes_file = None
-        for path in [
-            dataset_dir / "classes.txt",
-            dataset_dir / "labels" / "classes.txt",
-        ]:
-            if path.exists():
-                classes_file = path
-                break
-        
-        if not classes_file:
-            raise ValueError(f"找不到 classes.txt 文件: {dataset_dir}")
-        
-        # 读取类别
-        with open(classes_file, "r", encoding="utf-8") as f:
-            class_names = [line.strip() for line in f if line.strip()]
-        
-        if not class_names:
-            raise ValueError("classes.txt 为空")
-        
-        # 确定图片目录结构
-        # 支持多种常见结构:
-        # 1. dataset/images + dataset/labels
-        # 2. dataset/images/train + dataset/images/val
-        # 3. 直接在 dataset 目录下
-        
-        images_dir = dataset_dir / "images"
-        if not images_dir.exists():
-            images_dir = dataset_dir
-        
-        train_dir = images_dir / "train"
-        val_dir = images_dir / "val"
-        
-        if train_dir.exists() and val_dir.exists():
-            train_path = str(train_dir)
-            val_path = str(val_dir)
-        else:
-            # 使用同一目录作为训练和验证集
-            train_path = str(images_dir)
-            val_path = str(images_dir)
-        
-        # 生成 YAML 配置
-        data_config = {
-            "path": str(dataset_dir),
-            "train": train_path,
-            "val": val_path,
-            "names": {i: name for i, name in enumerate(class_names)},
-        }
-        
-        # 保存 YAML 文件
-        yaml_path = Path(output_dir) / f"{project.name}_data.yaml"
-        yaml_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        with open(yaml_path, "w", encoding="utf-8") as f:
-            yaml.dump(data_config, f, allow_unicode=True, default_flow_style=False)
-        
+    def _resolve_data_yaml(self, train_folder: str) -> str:
+        """从训练文件夹解析 data.yaml 配置文件"""
+        dataset_dir = Path(train_folder)
+        yaml_path = dataset_dir / "data.yaml"
+
+        if not yaml_path.exists():
+            raise ValueError(f"找不到 data.yaml: {dataset_dir}")
+
+        with open(yaml_path, "r", encoding="utf-8") as f:
+            data_config = yaml.safe_load(f) or {}
+
+        missing_keys = [k for k in ("train", "val", "names") if k not in data_config]
+        if missing_keys:
+            missing_text = ", ".join(missing_keys)
+            raise ValueError(f"data.yaml 缺少必要字段: {missing_text}")
+
         return str(yaml_path)
     
     def _start_training(self, config: dict):
         """开始训练"""
         try:
-            project: DatasetProject = config["project"]
+            train_folder = config["train_folder"]
+            train_name = config["train_name"]
             
-            # 生成数据集配置文件
-            data_yaml = self._generate_data_yaml(project, config["output_dir"])
+            # 解析训练文件夹中的 data.yaml
+            data_yaml = self._resolve_data_yaml(train_folder)
             
             self.log_panel.reset()
-            self.log_panel.append_log(f"[INFO] 数据集: {project.name}")
-            self.log_panel.append_log(f"[INFO] 目录: {project.directory}")
-            self.log_panel.append_log(f"[INFO] 生成配置文件: {data_yaml}")
+            self.log_panel.append_log(f"[INFO] 训练文件夹: {train_folder}")
+            self.log_panel.append_log(f"[INFO] 使用配置文件: {data_yaml}")
             
             # 创建训练线程
             self._train_thread = YoloTrainThread(
@@ -706,7 +687,7 @@ class TrainPage(QWidget):
                 imgsz=config["imgsz"],
                 device=config["device"],
                 project_dir=config["output_dir"],
-                name=project.name,
+                name=train_name,
             )
             
             # 连接信号
