@@ -11,6 +11,13 @@ class DetectionMode(Enum):
     REFERENCE_IMAGE = "reference_image"
 
 
+class InferenceBackend(Enum):
+    """推理后端枚举"""
+
+    VISION_API = "vision_api"
+    YOLO_PT = "yolo_pt"
+
+
 @dataclass
 class ReferenceImageInfo:
     """参考图片信息"""

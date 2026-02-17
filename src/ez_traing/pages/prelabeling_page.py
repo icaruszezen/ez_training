@@ -41,8 +41,9 @@ from qfluentwidgets import (
 from ez_traing.common.constants import SUPPORTED_IMAGE_FORMATS
 from ez_traing.prelabeling.config import APIConfigManager
 from ez_traing.prelabeling.engine import PrelabelingWorker, validate_prelabeling_input
-from ez_traing.prelabeling.models import DetectionMode, PrelabelingStats
+from ez_traing.prelabeling.models import DetectionMode, InferenceBackend, PrelabelingStats
 from ez_traing.prelabeling.vision_service import VisionModelService
+from ez_traing.prelabeling.yolo_service import YoloModelService
 
 logger = logging.getLogger(__name__)
 
@@ -289,6 +290,7 @@ class PrelabelingPage(QWidget):
         self._current_project_id: Optional[str] = None
         self._project_ids: List[str] = []
         self._detection_mode: DetectionMode = DetectionMode.TEXT_ONLY
+        self._inference_backend: InferenceBackend = InferenceBackend.VISION_API
         self._setup_ui()
 
     # ------------------------------------------------------------------
@@ -316,12 +318,15 @@ class PrelabelingPage(QWidget):
 
         # 各功能卡片
         self._content_layout.addWidget(self._create_dataset_card())
-        self._content_layout.addWidget(self._create_config_card())
-        self._content_layout.addWidget(self._create_prompt_card())
+        self._config_card = self._create_config_card()
+        self._content_layout.addWidget(self._config_card)
+        self._prompt_card = self._create_prompt_card()
+        self._content_layout.addWidget(self._prompt_card)
         self._content_layout.addWidget(self._create_action_card())
         self._content_layout.addWidget(self._create_log_card())
 
         self._content_layout.addStretch()
+        self._apply_backend_ui_state()
 
         scroll_area.setWidget(content_widget)
         main_layout.addWidget(scroll_area)
@@ -435,27 +440,42 @@ class PrelabelingPage(QWidget):
         layout.setContentsMargins(20, 16, 20, 16)
         layout.setSpacing(10)
 
-        layout.addWidget(SubtitleLabel("API 配置", card))
+        layout.addWidget(SubtitleLabel("推理配置", card))
 
-        # Endpoint
-        layout.addWidget(StrongBodyLabel("API 地址", card))
+        layout.addWidget(StrongBodyLabel("推理方式", card))
+        self.inference_backend_combo = ComboBox(card)
+        self.inference_backend_combo.addItem("视觉 API")
+        self.inference_backend_combo.addItem("本地 YOLO (.pt)")
+        self.inference_backend_combo.setCurrentIndex(0)
+        self.inference_backend_combo.currentIndexChanged.connect(
+            self._on_inference_backend_changed
+        )
+        layout.addWidget(self.inference_backend_combo)
+
+        self.backend_hint_label = CaptionLabel("", card)
+        self.backend_hint_label.setWordWrap(True)
+        layout.addWidget(self.backend_hint_label)
+
+        # API 配置区域
+        self.api_config_widget = QWidget(card)
+        api_layout = QVBoxLayout(self.api_config_widget)
+        api_layout.setContentsMargins(0, 0, 0, 0)
+        api_layout.setSpacing(10)
+        api_layout.addWidget(StrongBodyLabel("API 地址", card))
         self.endpoint_edit = LineEdit(card)
         self.endpoint_edit.setPlaceholderText("https://api.openai.com/v1/chat/completions")
-        layout.addWidget(self.endpoint_edit)
+        api_layout.addWidget(self.endpoint_edit)
 
-        # API Key
-        layout.addWidget(StrongBodyLabel("API 令牌", card))
+        api_layout.addWidget(StrongBodyLabel("API 令牌", card))
         self.api_key_edit = PasswordLineEdit(card)
         self.api_key_edit.setPlaceholderText("sk-...")
-        layout.addWidget(self.api_key_edit)
+        api_layout.addWidget(self.api_key_edit)
 
-        # Model name
-        layout.addWidget(StrongBodyLabel("模型名称", card))
+        api_layout.addWidget(StrongBodyLabel("模型名称", card))
         self.model_name_edit = LineEdit(card)
         self.model_name_edit.setPlaceholderText("gpt-4-vision-preview")
-        layout.addWidget(self.model_name_edit)
+        api_layout.addWidget(self.model_name_edit)
 
-        # Timeout
         timeout_layout = QHBoxLayout()
         timeout_layout.addWidget(StrongBodyLabel("超时时间 (秒)", card))
         self.timeout_spin = SpinBox(card)
@@ -463,13 +483,33 @@ class PrelabelingPage(QWidget):
         self.timeout_spin.setValue(60)
         timeout_layout.addWidget(self.timeout_spin)
         timeout_layout.addStretch()
-        layout.addLayout(timeout_layout)
+        api_layout.addLayout(timeout_layout)
 
-        # Save button
         self.save_config_btn = PushButton("保存配置", card)
         self.save_config_btn.setIcon(FIF.SAVE)
         self.save_config_btn.clicked.connect(self._on_save_config)
-        layout.addWidget(self.save_config_btn)
+        api_layout.addWidget(self.save_config_btn)
+        layout.addWidget(self.api_config_widget)
+
+        # YOLO 本地配置区域
+        self.yolo_config_widget = QWidget(card)
+        yolo_layout = QVBoxLayout(self.yolo_config_widget)
+        yolo_layout.setContentsMargins(0, 0, 0, 0)
+        yolo_layout.setSpacing(8)
+        yolo_layout.addWidget(StrongBodyLabel("YOLO 权重文件 (.pt)", card))
+        yolo_row = QHBoxLayout()
+        self.yolo_model_edit = LineEdit(card)
+        self.yolo_model_edit.setPlaceholderText("选择训练好的 .pt 文件")
+        yolo_row.addWidget(self.yolo_model_edit)
+        self.browse_yolo_model_btn = PushButton("浏览", card)
+        self.browse_yolo_model_btn.setIcon(FIF.FOLDER)
+        self.browse_yolo_model_btn.clicked.connect(self._browse_yolo_model)
+        yolo_row.addWidget(self.browse_yolo_model_btn)
+        yolo_layout.addLayout(yolo_row)
+        yolo_layout.addWidget(
+            CaptionLabel("将使用该权重对数据集图片进行目标识别并生成 VOC 标注", card)
+        )
+        layout.addWidget(self.yolo_config_widget)
 
         # 加载已有配置到 UI
         self._load_config_to_ui()
@@ -500,6 +540,40 @@ class PrelabelingPage(QWidget):
             position=InfoBarPosition.TOP,
             duration=2000,
         )
+
+    def _browse_yolo_model(self) -> None:
+        """选择 YOLO .pt 权重文件。"""
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择 YOLO 权重文件",
+            "",
+            "PyTorch 权重 (*.pt);;所有文件 (*)",
+        )
+        if path:
+            self.yolo_model_edit.setText(path)
+
+    def _on_inference_backend_changed(self, index: int) -> None:
+        """切换推理后端。"""
+        self._inference_backend = (
+            InferenceBackend.VISION_API if index == 0 else InferenceBackend.YOLO_PT
+        )
+        self._apply_backend_ui_state()
+
+    def _apply_backend_ui_state(self) -> None:
+        """根据推理后端切换 UI 可见状态。"""
+        is_api = self._inference_backend == InferenceBackend.VISION_API
+        self.api_config_widget.setVisible(is_api)
+        self.yolo_config_widget.setVisible(not is_api)
+        if hasattr(self, "_prompt_card"):
+            self._prompt_card.setVisible(is_api)
+        if is_api:
+            self.backend_hint_label.setText("使用远程视觉 API 进行预标注")
+            if hasattr(self, "start_btn"):
+                self.start_btn.setText("开始预标注")
+        else:
+            self.backend_hint_label.setText("使用本地 YOLO .pt 模型进行识别并生成/合并 VOC 标注")
+            if hasattr(self, "start_btn"):
+                self.start_btn.setText("开始识别")
 
     # ------------------------------------------------------------------
     # Card: 提示词
@@ -581,9 +655,15 @@ class PrelabelingPage(QWidget):
         layout.addWidget(SubtitleLabel("操作", card))
 
         # 复选框
-        self.skip_annotated_cb = CheckBox("仅处理未标注图片", card)
+        self.skip_annotated_cb = CheckBox("仅识别未标注图片（跳过已有 XML）", card)
         self.skip_annotated_cb.setChecked(True)
         layout.addWidget(self.skip_annotated_cb)
+        layout.addWidget(
+            CaptionLabel(
+                "取消勾选后将识别全部图片；若图片已有 XML 标注，会与识别结果合并保存。",
+                card,
+            )
+        )
 
         # 并发线程数
         concurrency_layout = QHBoxLayout()
@@ -691,9 +771,10 @@ class PrelabelingPage(QWidget):
         """开始预标注"""
         prompt = self.prompt_edit.toPlainText().strip()
 
-        # 参考图片模式验证：未添加参考图片时提前拦截（需求 3.4）
+        # 参考图片模式验证：仅视觉 API 模式下需要
         if (
-            self._detection_mode == DetectionMode.REFERENCE_IMAGE
+            self._inference_backend == InferenceBackend.VISION_API
+            and self._detection_mode == DetectionMode.REFERENCE_IMAGE
             and not self._ref_panel.get_image_paths()
         ):
             InfoBar.warning(
@@ -705,17 +786,20 @@ class PrelabelingPage(QWidget):
             return
 
         # 获取参考图片列表（仅参考图片模式下传递）
-        reference_images = (
-            self._ref_panel.get_image_paths()
-            if self._detection_mode == DetectionMode.REFERENCE_IMAGE
-            else None
-        )
+        reference_images = None
+        if (
+            self._inference_backend == InferenceBackend.VISION_API
+            and self._detection_mode == DetectionMode.REFERENCE_IMAGE
+        ):
+            reference_images = self._ref_panel.get_image_paths()
 
         # 验证输入
         try:
             validate_prelabeling_input(
                 prompt,
                 self._config_manager,
+                inference_backend=self._inference_backend.value,
+                yolo_model_path=self.yolo_model_edit.text().strip(),
                 detection_mode=self._detection_mode.value,
                 reference_images=reference_images,
             )
@@ -747,13 +831,37 @@ class PrelabelingPage(QWidget):
             return
 
         # 创建服务和工作线程
-        vision_service = VisionModelService(self._config_manager)
+        vision_service = None
+        yolo_service = None
+        max_workers = self.concurrency_spin.value()
+        if self._inference_backend == InferenceBackend.VISION_API:
+            vision_service = VisionModelService(self._config_manager)
+        else:
+            try:
+                yolo_service = YoloModelService(
+                    model_path=self.yolo_model_edit.text().strip()
+                )
+            except Exception as e:
+                InfoBar.error(
+                    title="加载模型失败",
+                    content=str(e),
+                    parent=self.window(),
+                    position=InfoBarPosition.TOP,
+                )
+                return
+            # 本地模型推理使用单线程，避免模型并发访问造成不稳定
+            if max_workers > 1:
+                self._log("本地 YOLO 模式下并发已自动调整为 1", level="warning")
+                max_workers = 1
+
         self._worker = PrelabelingWorker(
             image_paths=self._image_paths,
             prompt=prompt,
             vision_service=vision_service,
+            yolo_service=yolo_service,
+            inference_backend=self._inference_backend.value,
             skip_annotated=self.skip_annotated_cb.isChecked(),
-            max_workers=self.concurrency_spin.value(),
+            max_workers=max_workers,
             reference_images=reference_images,
             detection_mode=self._detection_mode.value,
         )
@@ -768,10 +876,19 @@ class PrelabelingPage(QWidget):
         self._log("预标注开始")
 
         # 记录检测模式和参考图片信息
-        mode_label = "参考图片" if self._detection_mode == DetectionMode.REFERENCE_IMAGE else "仅文本提示"
-        self._log(f"检测模式: {mode_label}")
-        if reference_images:
-            self._log(f"参考图片数量: {len(reference_images)}")
+        if self._inference_backend == InferenceBackend.VISION_API:
+            mode_label = (
+                "参考图片"
+                if self._detection_mode == DetectionMode.REFERENCE_IMAGE
+                else "仅文本提示"
+            )
+            self._log("推理方式: 视觉 API")
+            self._log(f"检测模式: {mode_label}")
+            if reference_images:
+                self._log(f"参考图片数量: {len(reference_images)}")
+        else:
+            self._log("推理方式: 本地 YOLO")
+            self._log(f"权重文件: {self.yolo_model_edit.text().strip()}")
 
         self._worker.start()
 
@@ -824,3 +941,7 @@ class PrelabelingPage(QWidget):
         self.save_config_btn.setEnabled(not running)
         self.dataset_combo.setEnabled(not running)
         self.concurrency_spin.setEnabled(not running)
+        self.inference_backend_combo.setEnabled(not running)
+        self.browse_yolo_model_btn.setEnabled(not running)
+        self.yolo_model_edit.setEnabled(not running)
+        self.mode_combo.setEnabled(not running)

@@ -2,6 +2,7 @@
 
 import sys
 import os
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -19,6 +20,19 @@ from libs.pascal_voc_io import PascalVocWriter
 
 class VOCAnnotationWriter:
     """VOC 标注文件写入器"""
+
+    @staticmethod
+    def _deduplicate_boxes(boxes: List[BoundingBox]) -> List[BoundingBox]:
+        """按标签和坐标去重，保留出现顺序。"""
+        seen = set()
+        merged: List[BoundingBox] = []
+        for box in boxes:
+            key = (box.label, box.x_min, box.y_min, box.x_max, box.y_max)
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(box)
+        return merged
 
     def save_annotation(
         self,
@@ -61,6 +75,58 @@ class VOCAnnotationWriter:
 
         writer.save(output_path)
         return output_path
+
+    def read_annotation(self, xml_path: str) -> List[BoundingBox]:
+        """读取已有 VOC 标注并转换为 BoundingBox 列表。"""
+        path = Path(xml_path)
+        if not path.exists():
+            return []
+
+        root = ET.parse(path).getroot()
+        boxes: List[BoundingBox] = []
+        for obj in root.findall("object"):
+            name = (obj.findtext("name") or "").strip()
+            bnd = obj.find("bndbox")
+            if not name or bnd is None:
+                continue
+            try:
+                x_min = int(float((bnd.findtext("xmin") or "0").strip()))
+                y_min = int(float((bnd.findtext("ymin") or "0").strip()))
+                x_max = int(float((bnd.findtext("xmax") or "0").strip()))
+                y_max = int(float((bnd.findtext("ymax") or "0").strip()))
+            except ValueError:
+                continue
+
+            boxes.append(
+                BoundingBox(
+                    label=name,
+                    x_min=x_min,
+                    y_min=y_min,
+                    x_max=x_max,
+                    y_max=y_max,
+                    confidence=1.0,
+                )
+            )
+        return boxes
+
+    def save_merged_annotation(
+        self,
+        image_path: str,
+        image_size: Tuple[int, int, int],
+        boxes: List[BoundingBox],
+        output_path: Optional[str] = None,
+    ) -> str:
+        """将识别结果与已有 VOC 标注合并后保存。"""
+        img_path = Path(image_path)
+        xml_path = Path(output_path) if output_path else img_path.with_suffix(".xml")
+        existing_boxes = self.read_annotation(str(xml_path))
+        all_boxes = self._deduplicate_boxes(existing_boxes + boxes)
+        return self.save_annotation(
+            image_path=image_path,
+            image_size=image_size,
+            boxes=all_boxes,
+            output_path=str(xml_path),
+        )
 
     def _get_image_size(self, image_path: str) -> Tuple[int, int, int]:
         """

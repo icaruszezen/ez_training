@@ -4,13 +4,20 @@ import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 from PyQt5.QtCore import QThread, pyqtSignal
 
-from ez_traing.prelabeling.models import BoundingBox, DetectionMode, DetectionResult, PrelabelingStats
+from ez_traing.prelabeling.models import (
+    BoundingBox,
+    DetectionMode,
+    DetectionResult,
+    InferenceBackend,
+    PrelabelingStats,
+)
 from ez_traing.prelabeling.vision_service import VisionModelService
 from ez_traing.prelabeling.voc_writer import VOCAnnotationWriter
+from ez_traing.prelabeling.yolo_service import YoloModelService
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +25,8 @@ logger = logging.getLogger(__name__)
 def validate_prelabeling_input(
     prompt: str,
     config_manager,
+    inference_backend: str = "vision_api",
+    yolo_model_path: str = "",
     detection_mode: str = "text_only",
     reference_images: List[str] = None,
 ) -> bool:
@@ -39,6 +48,19 @@ def validate_prelabeling_input(
         ValueError: 参考图片模式下未提供参考图片
         ValueError: API 配置不完整（endpoint 或 api_key 为空）
     """
+    backend = InferenceBackend(inference_backend)
+
+    if backend == InferenceBackend.YOLO_PT:
+        model_path = (yolo_model_path or "").strip()
+        if not model_path:
+            raise ValueError("请先选择 YOLO 权重文件（.pt）")
+        path = Path(model_path)
+        if not path.exists() or not path.is_file():
+            raise ValueError("YOLO 权重文件不存在")
+        if path.suffix.lower() != ".pt":
+            raise ValueError("YOLO 权重文件必须是 .pt 格式")
+        return True
+
     is_reference_mode = detection_mode == DetectionMode.REFERENCE_IMAGE.value
 
     if is_reference_mode:
@@ -74,7 +96,9 @@ class PrelabelingWorker(QThread):
         self,
         image_paths: List[str],
         prompt: str,
-        vision_service: VisionModelService,
+        vision_service: Optional[VisionModelService] = None,
+        yolo_service: Optional[YoloModelService] = None,
+        inference_backend: str = "vision_api",
         skip_annotated: bool = True,
         overwrite: bool = False,
         max_workers: int = 1,
@@ -85,6 +109,8 @@ class PrelabelingWorker(QThread):
         self._image_paths = image_paths
         self._prompt = prompt
         self._vision_service = vision_service
+        self._yolo_service = yolo_service
+        self._inference_backend = InferenceBackend(inference_backend)
         self._skip_annotated = skip_annotated
         self._overwrite = overwrite
         self._is_cancelled = False
@@ -95,9 +121,17 @@ class PrelabelingWorker(QThread):
         self._detection_mode = DetectionMode(detection_mode)
 
         # 验证参考图片参数
-        if self._detection_mode == DetectionMode.REFERENCE_IMAGE:
+        if (
+            self._inference_backend == InferenceBackend.VISION_API
+            and self._detection_mode == DetectionMode.REFERENCE_IMAGE
+        ):
             if not reference_images:
                 raise ValueError("参考图片模式下必须提供至少一张参考图片")
+
+        if self._inference_backend == InferenceBackend.VISION_API and self._vision_service is None:
+            raise ValueError("视觉 API 模式下必须提供 vision_service")
+        if self._inference_backend == InferenceBackend.YOLO_PT and self._yolo_service is None:
+            raise ValueError("YOLO 模式下必须提供 yolo_service")
 
         self._reference_images = reference_images or []
 
@@ -190,14 +224,15 @@ class PrelabelingWorker(QThread):
         filename = Path(image_path).name
         self.progress.emit(index + 1, stats.total, f"正在处理: {filename}")
 
-        if self._detection_mode == DetectionMode.REFERENCE_IMAGE:
-            result: DetectionResult = self._vision_service.detect_objects_with_reference(
-                self._reference_images, image_path, self._prompt
-            )
+        if self._inference_backend == InferenceBackend.YOLO_PT:
+            result: DetectionResult = self._yolo_service.detect_objects(image_path)
         else:
-            result: DetectionResult = self._vision_service.detect_objects(
-                image_path, self._prompt
-            )
+            if self._detection_mode == DetectionMode.REFERENCE_IMAGE:
+                result = self._vision_service.detect_objects_with_reference(
+                    self._reference_images, image_path, self._prompt
+                )
+            else:
+                result = self._vision_service.detect_objects(image_path, self._prompt)
 
         if not result.success:
             _update_stats("processed")
@@ -217,10 +252,18 @@ class PrelabelingWorker(QThread):
 
         # 保存 VOC 标注
         try:
-            self._save_voc_annotation(image_path, result.boxes)
+            should_merge = (not self._skip_annotated) and self._has_annotation(image_path)
+            self._save_voc_annotation(
+                image_path,
+                result.boxes,
+                merge_existing=should_merge,
+            )
             _update_stats("processed")
             _update_stats("success")
-            msg = f"标注完成: {filename} ({len(result.boxes)} 个目标)"
+            if should_merge:
+                msg = f"标注合并完成: {filename}（新增 {len(result.boxes)} 个目标）"
+            else:
+                msg = f"标注完成: {filename} ({len(result.boxes)} 个目标)"
             logger.info(msg)
             self.image_completed.emit(image_path, True, msg)
         except Exception as e:
@@ -246,7 +289,12 @@ class PrelabelingWorker(QThread):
         xml_path = Path(image_path).with_suffix(".xml")
         return xml_path.exists()
 
-    def _save_voc_annotation(self, image_path: str, boxes: List[BoundingBox]) -> str:
+    def _save_voc_annotation(
+        self,
+        image_path: str,
+        boxes: List[BoundingBox],
+        merge_existing: bool = False,
+    ) -> str:
         """保存 VOC 格式标注文件
 
         Args:
@@ -257,6 +305,8 @@ class PrelabelingWorker(QThread):
             保存的标注文件路径
         """
         image_size = self._voc_writer._get_image_size(image_path)
+        if merge_existing:
+            return self._voc_writer.save_merged_annotation(image_path, image_size, boxes)
         return self._voc_writer.save_annotation(image_path, image_size, boxes)
 
 
