@@ -1,5 +1,6 @@
 """Albumentations 数据增强封装。"""
 
+import inspect
 from typing import Callable, Dict, List, Tuple
 
 import numpy as np
@@ -50,9 +51,7 @@ def _build_transform_map() -> Dict[str, Callable[[], "A.BasicTransform"]]:
         ),
         "affine": lambda: A.Affine(scale=(0.9, 1.1), translate_percent=(-0.08, 0.08), p=0.4),
         "perspective": lambda: A.Perspective(scale=(0.03, 0.08), p=0.3),
-        "random_resized_crop": lambda: A.RandomResizedCrop(
-            height=640, width=640, scale=(0.7, 1.0), ratio=(0.8, 1.25), p=0.3
-        ),
+        "random_resized_crop": _build_random_resized_crop,
         "brightness_contrast": lambda: A.RandomBrightnessContrast(p=0.5),
         "hsv": lambda: A.HueSaturationValue(p=0.4),
         "rgb_shift": lambda: A.RGBShift(p=0.3),
@@ -66,6 +65,17 @@ def _build_transform_map() -> Dict[str, Callable[[], "A.BasicTransform"]]:
             max_holes=8, max_height=32, max_width=32, p=0.25
         ),
     }
+
+
+def _build_random_resized_crop():
+    """兼容 Albumentations 1.x/2.x 的 RandomResizedCrop 参数差异。"""
+    if A is None:
+        raise RuntimeError("未安装 albumentations，请先安装依赖")
+
+    params = inspect.signature(A.RandomResizedCrop).parameters
+    if "size" in params:
+        return A.RandomResizedCrop(size=(640, 640), scale=(0.7, 1.0), ratio=(0.8, 1.25), p=0.3)
+    return A.RandomResizedCrop(height=640, width=640, scale=(0.7, 1.0), ratio=(0.8, 1.25), p=0.3)
 
 
 def build_augmenter(methods: List[str]):

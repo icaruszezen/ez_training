@@ -29,6 +29,7 @@ from PyQt5.QtWidgets import (
     QMessageBox,
     QScrollArea,
     QGridLayout,
+    QComboBox,
 )
 from qfluentwidgets import (
     PushButton,
@@ -156,10 +157,18 @@ class AnnotationStats:
         return self.annotated_images / self.total_images * 100
 
 
+@dataclass
+class ImageInfo:
+    """图片元信息（用于筛选）"""
+    path: str
+    is_annotated: bool
+    image_type: str  # 小写扩展名，不含点，例如 jpg / png
+
+
 class ImageScanner(QThread):
     """异步图片扫描线程"""
     progress = pyqtSignal(int, int)  # current, total
-    finished = pyqtSignal(list, object)  # image_paths, AnnotationStats
+    finished = pyqtSignal(list, object)  # image_infos, AnnotationStats
     
     def __init__(self, directory: str, classes_file: str = None):
         super().__init__()
@@ -167,6 +176,7 @@ class ImageScanner(QThread):
         self.classes_file = classes_file
         self._is_cancelled = False
         self._class_names = []  # YOLO 类别名称列表
+        self._voc_label_cache: Dict[tuple[str, int], List[str]] = {}
     
     def _load_classes(self):
         """加载 YOLO classes.txt 文件"""
@@ -215,8 +225,18 @@ class ImageScanner(QThread):
         """解析 VOC 格式标注文件，返回标签列表"""
         labels = []
         try:
+            resolved = xml_path.resolve()
+            mtime_ns = resolved.stat().st_mtime_ns
+            cache_key = (str(resolved), mtime_ns)
+            cached = self._voc_label_cache.get(cache_key)
+            if cached is not None:
+                return list(cached)
+        except OSError:
+            resolved = xml_path
+            cache_key = None
+        try:
             import xml.etree.ElementTree as ET
-            tree = ET.parse(xml_path)
+            tree = ET.parse(resolved)
             root = tree.getroot()
             for obj in root.findall("object"):
                 name = obj.find("name")
@@ -224,10 +244,15 @@ class ImageScanner(QThread):
                     labels.append(name.text)
         except Exception:
             pass
+        if cache_key is not None:
+            stale_keys = [k for k in self._voc_label_cache.keys() if k[0] == cache_key[0] and k != cache_key]
+            for key in stale_keys:
+                self._voc_label_cache.pop(key, None)
+            self._voc_label_cache[cache_key] = list(labels)
         return labels
     
     def run(self):
-        image_paths = []
+        image_infos = []
         all_files = []
         stats = AnnotationStats()
         label_counter = Counter()
@@ -247,7 +272,6 @@ class ImageScanner(QThread):
         for i, file_path in enumerate(all_files):
             if self._is_cancelled:
                 break
-            image_paths.append(file_path)
             
             path = Path(file_path)
             labels = []
@@ -262,17 +286,26 @@ class ImageScanner(QThread):
                 if xml_path.exists():
                     labels = self._parse_voc_annotation(xml_path)
             
-            if labels:
+            is_annotated = bool(labels)
+            if is_annotated:
                 stats.annotated_images += 1
                 stats.total_objects += len(labels)
                 label_counter.update(labels)
+
+            image_infos.append(
+                ImageInfo(
+                    path=file_path,
+                    is_annotated=is_annotated,
+                    image_type=path.suffix.lower().lstrip("."),
+                )
+            )
             
             self.progress.emit(i + 1, total)
         
         stats.unannotated_images = stats.total_images - stats.annotated_images
         stats.label_counts = dict(label_counter)
         
-        self.finished.emit(image_paths, stats)
+        self.finished.emit(image_infos, stats)
     
     def cancel(self):
         self._is_cancelled = True
@@ -763,6 +796,7 @@ class ImageListPanel(CardWidget):
     
     image_selected = pyqtSignal(str)  # image_path
     image_double_clicked = pyqtSignal(str)  # image_path
+    filters_changed = pyqtSignal(str, str)  # annotation_filter, type_filter
     
     BATCH_SIZE = 50  # 每批添加的图片数量
     
@@ -789,6 +823,24 @@ class ImageListPanel(CardWidget):
         self.count_label = CaptionLabel("共 0 张图片")
         header_layout.addWidget(self.count_label)
         layout.addLayout(header_layout)
+
+        # 筛选栏
+        filter_layout = QHBoxLayout()
+        filter_layout.setSpacing(8)
+        filter_layout.addWidget(CaptionLabel("标注:"))
+
+        self.annotation_filter = QComboBox()
+        self.annotation_filter.addItems(["全部", "已标注", "未标注"])
+        self.annotation_filter.currentIndexChanged.connect(self._on_filters_changed)
+        filter_layout.addWidget(self.annotation_filter)
+
+        filter_layout.addWidget(CaptionLabel("类型:"))
+        self.type_filter = QComboBox()
+        self.type_filter.addItem("全部")
+        self.type_filter.currentIndexChanged.connect(self._on_filters_changed)
+        filter_layout.addWidget(self.type_filter)
+        filter_layout.addStretch()
+        layout.addLayout(filter_layout)
         
         # 图片列表
         self.image_list = QListWidget()
@@ -823,12 +875,13 @@ class ImageListPanel(CardWidget):
         self.image_list.itemDoubleClicked.connect(self._on_item_double_clicked)
         layout.addWidget(self.image_list, 1)
     
-    def set_images(self, image_paths: List[str]):
+    def set_images(self, image_paths: List[str], reset_cache: bool = False):
         """设置图片列表 - 分批添加避免卡顿"""
         self._add_timer.stop()
         self.image_list.clear()
-        self._thumbnail_cache.clear()
         self._path_to_item.clear()
+        if reset_cache:
+            self._thumbnail_cache.clear()
         
         count = len(image_paths)
         self.count_label.setText(f"共 {count} 张图片")
@@ -857,7 +910,11 @@ class ImageListPanel(CardWidget):
         # 批量添加
         for path in batch:
             item = QListWidgetItem()
-            item.setIcon(QIcon(self._placeholder_pixmap))
+            cached = self._thumbnail_cache.get(path)
+            if cached:
+                item.setIcon(QIcon(cached))
+            else:
+                item.setIcon(QIcon(self._placeholder_pixmap))
             item.setText(Path(path).name)
             item.setData(Qt.UserRole, path)
             item.setSizeHint(QSize(140, 160))
@@ -884,6 +941,37 @@ class ImageListPanel(CardWidget):
         self._thumbnail_cache.clear()
         self._path_to_item.clear()
         self.count_label.setText("共 0 张图片")
+        self.reset_filters()
+        self.set_type_options([])
+
+    def set_type_options(self, image_types: List[str]):
+        """设置类型筛选选项"""
+        current = self.type_filter.currentText()
+        self.type_filter.blockSignals(True)
+        self.type_filter.clear()
+        self.type_filter.addItem("全部")
+        for image_type in image_types:
+            self.type_filter.addItem(image_type.upper())
+        if current in ["全部", ""] or current not in [t.upper() for t in image_types]:
+            self.type_filter.setCurrentIndex(0)
+        else:
+            self.type_filter.setCurrentText(current)
+        self.type_filter.blockSignals(False)
+
+    def reset_filters(self):
+        """重置筛选"""
+        self.annotation_filter.blockSignals(True)
+        self.type_filter.blockSignals(True)
+        self.annotation_filter.setCurrentIndex(0)
+        self.type_filter.setCurrentIndex(0)
+        self.annotation_filter.blockSignals(False)
+        self.type_filter.blockSignals(False)
+
+    def _on_filters_changed(self):
+        self.filters_changed.emit(
+            self.annotation_filter.currentText(),
+            self.type_filter.currentText(),
+        )
     
     def _create_placeholder_pixmap(self) -> QPixmap:
         """创建占位图"""
@@ -922,7 +1010,9 @@ class DatasetPage(QWidget):
         super().__init__(parent)
         self.project_manager = ProjectManager()
         self.current_project: Optional[DatasetProject] = None
+        self.image_infos: List[ImageInfo] = []
         self.image_paths: List[str] = []
+        self.filtered_image_paths: List[str] = []
         self._scanner: Optional[ImageScanner] = None
         self._thumbnail_loader: Optional[ThumbnailLoader] = None
         
@@ -957,6 +1047,7 @@ class DatasetPage(QWidget):
         self.image_list_panel = ImageListPanel()
         self.image_list_panel.image_selected.connect(self._on_image_selected)
         self.image_list_panel.image_double_clicked.connect(self._on_image_double_clicked)
+        self.image_list_panel.filters_changed.connect(self._on_filters_changed)
         content_splitter.addWidget(self.image_list_panel)
         
         # 右侧：统计和预览（垂直分割）
@@ -1087,7 +1178,9 @@ class DatasetPage(QWidget):
             
             if self.current_project and self.current_project.id == project_id:
                 self.current_project = None
+                self.image_infos.clear()
                 self.image_paths.clear()
+                self.filtered_image_paths.clear()
                 self.image_list_panel.clear()
                 self.preview_widget.set_image(None)
                 self.statistics_panel.clear()
@@ -1128,7 +1221,9 @@ class DatasetPage(QWidget):
             self._thumbnail_loader.wait()
         
         self.current_project = project
+        self.image_infos.clear()
         self.image_paths.clear()
+        self.filtered_image_paths.clear()
         self.image_list_panel.clear()
         self.preview_widget.set_image(None)
         self.statistics_panel.clear()
@@ -1165,9 +1260,10 @@ class DatasetPage(QWidget):
             self.progress_bar.setValue(int(current / total * 100))
         self.status_label.setText(f"正在扫描: {current}/{total}")
     
-    def _on_scan_finished(self, image_paths: List[str], stats: AnnotationStats):
+    def _on_scan_finished(self, image_infos: List[ImageInfo], stats: AnnotationStats):
         """扫描完成"""
-        self.image_paths = sorted(image_paths)
+        self.image_infos = sorted(image_infos, key=lambda i: i.path)
+        self.image_paths = [info.path for info in self.image_infos]
         count = len(self.image_paths)
         
         # 更新统计面板
@@ -1195,8 +1291,10 @@ class DatasetPage(QWidget):
             )
             return
         
-        # 更新图片列表
-        self.image_list_panel.set_images(self.image_paths)
+        # 更新筛选项与图片列表
+        image_types = sorted({info.image_type for info in self.image_infos if info.image_type})
+        self.image_list_panel.set_type_options(image_types)
+        self._apply_filters()
         self.status_label.setText(f"扫描完成，共 {count} 张图片，正在加载缩略图...")
         
         # 启动缩略图加载
@@ -1231,6 +1329,36 @@ class DatasetPage(QWidget):
             duration=3000,
             parent=self
         )
+
+    def _on_filters_changed(self, annotation_filter: str, image_type_filter: str):
+        """筛选变化"""
+        del annotation_filter, image_type_filter
+        self._apply_filters()
+
+    def _apply_filters(self):
+        """根据筛选条件刷新列表"""
+        annotation_filter = self.image_list_panel.annotation_filter.currentText()
+        type_filter = self.image_list_panel.type_filter.currentText().lower()
+
+        filtered = []
+        for info in self.image_infos:
+            if annotation_filter == "已标注" and not info.is_annotated:
+                continue
+            if annotation_filter == "未标注" and info.is_annotated:
+                continue
+            if type_filter != "全部" and info.image_type != type_filter:
+                continue
+            filtered.append(info.path)
+
+        self.filtered_image_paths = filtered
+        self.image_list_panel.set_images(self.filtered_image_paths)
+        self.preview_widget.set_image(None)
+        self.annotate_btn.setEnabled(False)
+
+        if self.current_project:
+            self.status_label.setText(
+                f"{self.current_project.name}: 共 {len(self.image_paths)} 张，筛选后 {len(self.filtered_image_paths)} 张"
+            )
     
     def _on_image_selected(self, image_path: str):
         """图片选择"""

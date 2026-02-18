@@ -4,9 +4,10 @@ import logging
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional
+from time import perf_counter
+from typing import Dict, List, Optional, Tuple
 
-from PyQt5.QtCore import QSize, Qt, pyqtSignal
+from PyQt5.QtCore import QSize, Qt, QThread, QTimer, pyqtSignal
 from PyQt5.QtGui import QFont, QIcon, QPixmap, QTextCursor
 from PyQt5.QtWidgets import (
     QFileDialog,
@@ -278,6 +279,43 @@ class ReferenceImagePanel(QWidget):
         self._list_widget.addItem(item)
 
 
+class ProjectImageScanWorker(QThread):
+    """项目图片扫描后台线程。"""
+
+    finished = pyqtSignal(str, list, str, float)  # project_id, image_paths, error, elapsed_sec
+
+    def __init__(self, project_id: str, directory: str):
+        super().__init__()
+        self._project_id = project_id
+        self._directory = directory
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        self._cancelled = True
+
+    def run(self) -> None:
+        started_at = perf_counter()
+        image_paths: List[str] = []
+        error = ""
+        try:
+            for root, _, files in os.walk(self._directory):
+                if self._cancelled:
+                    break
+                for file_name in files:
+                    if Path(file_name).suffix.lower() in SUPPORTED_IMAGE_FORMATS:
+                        image_paths.append(os.path.join(root, file_name))
+            image_paths.sort()
+        except OSError as e:
+            error = str(e)
+
+        self.finished.emit(
+            self._project_id,
+            image_paths,
+            error,
+            perf_counter() - started_at,
+        )
+
+
 class PrelabelingPage(QWidget):
     """预标注页面"""
 
@@ -289,8 +327,19 @@ class PrelabelingPage(QWidget):
         self._project_manager = None  # ProjectManager reference
         self._current_project_id: Optional[str] = None
         self._project_ids: List[str] = []
+        self._scan_worker: Optional[ProjectImageScanWorker] = None
+        self._scan_cache: Dict[str, Tuple[int, List[str]]] = {}
         self._detection_mode: DetectionMode = DetectionMode.TEXT_ONLY
         self._inference_backend: InferenceBackend = InferenceBackend.YOLO_PT
+        self._run_started_at: Optional[float] = None
+        self._last_progress_percent = -1
+        self._last_progress_text = ""
+        self._last_progress_update_at = 0.0
+        self._log_count = 0
+        self._log_buffer: List[str] = []
+        self._log_flush_timer = QTimer(self)
+        self._log_flush_timer.setInterval(100)
+        self._log_flush_timer.timeout.connect(self._flush_log_buffer)
         self._setup_ui()
 
     # ------------------------------------------------------------------
@@ -411,22 +460,56 @@ class PrelabelingPage(QWidget):
             )
             return
 
+        project_dir = Path(project.directory)
         try:
-            image_paths = []
-            for root, _, files in os.walk(project.directory):
-                for f in files:
-                    if Path(f).suffix.lower() in SUPPORTED_IMAGE_FORMATS:
-                        image_paths.append(os.path.join(root, f))
-            image_paths.sort()
-            self._image_paths = image_paths
-            count = len(image_paths)
-            self.dataset_info_label.setText(f"已加载 {count} 张图片")
-            self._log(f"数据集 '{project.name}' 已加载 {count} 张图片")
-        except OSError as e:
+            directory_mtime = project_dir.stat().st_mtime_ns
+        except OSError:
+            directory_mtime = -1
+        cache_key = project.id
+        cached = self._scan_cache.get(cache_key)
+        if cached is not None and cached[0] == directory_mtime:
+            self._image_paths = list(cached[1])
+            count = len(self._image_paths)
+            self.dataset_info_label.setText(f"已加载 {count} 张图片（缓存）")
+            self._log(f"数据集 '{project.name}' 读取缓存，共 {count} 张图片")
+            return
+
+        if self._scan_worker and self._scan_worker.isRunning():
+            self._scan_worker.cancel()
+
+        self.dataset_info_label.setText("正在扫描图片...")
+        self._log(f"开始扫描数据集 '{project.name}' ...")
+        self._scan_worker = ProjectImageScanWorker(project.id, project.directory)
+        self._scan_worker.finished.connect(self._on_project_scan_finished)
+        self._scan_worker.start()
+
+    def _on_project_scan_finished(
+        self, project_id: str, image_paths: List[str], error: str, elapsed_sec: float
+    ) -> None:
+        if project_id != self._current_project_id:
+            return
+
+        project = self._project_manager.get_project(project_id) if self._project_manager else None
+        if project is None:
+            return
+
+        if error:
             self._image_paths.clear()
             self.dataset_info_label.setText("扫描目录时出错")
-            self._log(f"扫描目录出错: {e}", level="error")
-            logger.exception("扫描项目目录时出错")
+            self._log(f"扫描目录出错: {error}", level="error")
+            logger.error("扫描项目目录时出错: %s", error)
+            return
+
+        self._image_paths = list(image_paths)
+        count = len(image_paths)
+        self.dataset_info_label.setText(f"已加载 {count} 张图片")
+        self._log(f"数据集 '{project.name}' 已加载 {count} 张图片，耗时 {elapsed_sec:.2f}s")
+
+        try:
+            directory_mtime = Path(project.directory).stat().st_mtime_ns
+        except OSError:
+            directory_mtime = -1
+        self._scan_cache[project_id] = (directory_mtime, list(image_paths))
 
 
     # ------------------------------------------------------------------
@@ -719,7 +802,7 @@ class PrelabelingPage(QWidget):
         header_layout.addWidget(SubtitleLabel("日志", card))
         header_layout.addStretch()
         clear_btn = PushButton("清空", card)
-        clear_btn.clicked.connect(lambda: self.log_text.clear())
+        clear_btn.clicked.connect(self._clear_log)
         header_layout.addWidget(clear_btn)
         layout.addLayout(header_layout)
 
@@ -739,11 +822,26 @@ class PrelabelingPage(QWidget):
         """添加带时间戳的日志条目"""
         timestamp = datetime.now().strftime("%H:%M:%S")
         tag = level.upper()
-        self.log_text.append(f"[{timestamp}] [{tag}] {message}")
-        # 自动滚动到底部
+        self._log_buffer.append(f"[{timestamp}] [{tag}] {message}")
+        self._log_count += 1
+        if not self._log_flush_timer.isActive():
+            self._log_flush_timer.start()
+
+    def _flush_log_buffer(self) -> None:
+        if not self._log_buffer:
+            self._log_flush_timer.stop()
+            return
+        chunk = "\n".join(self._log_buffer)
+        self._log_buffer.clear()
+        self.log_text.append(chunk)
         cursor = self.log_text.textCursor()
         cursor.movePosition(QTextCursor.End)
         self.log_text.setTextCursor(cursor)
+        self._log_flush_timer.stop()
+
+    def _clear_log(self) -> None:
+        self._log_buffer.clear()
+        self.log_text.clear()
 
     # ------------------------------------------------------------------
     # Public API
@@ -873,6 +971,11 @@ class PrelabelingPage(QWidget):
 
         # 更新 UI 状态
         self._set_running_state(True)
+        self._run_started_at = perf_counter()
+        self._last_progress_percent = -1
+        self._last_progress_text = ""
+        self._last_progress_update_at = 0.0
+        self._log_count = 0
         self._log("预标注开始")
 
         # 记录检测模式和参考图片信息
@@ -902,6 +1005,16 @@ class PrelabelingPage(QWidget):
         """处理进度更新"""
         if total > 0:
             percent = int(current / total * 100)
+            now = perf_counter()
+            should_update = (
+                percent != self._last_progress_percent
+                or now - self._last_progress_update_at >= 0.2
+            )
+            if not should_update:
+                return
+            self._last_progress_percent = percent
+            self._last_progress_text = message
+            self._last_progress_update_at = now
             self.progress_bar.setValue(percent)
             self.progress_label.setText(f"{current}/{total} - {message}")
 
@@ -921,6 +1034,10 @@ class PrelabelingPage(QWidget):
             f"跳过: {stats.skipped}"
         )
         self._log(summary)
+        if self._run_started_at is not None:
+            elapsed = perf_counter() - self._run_started_at
+            self._log(f"运行耗时: {elapsed:.2f}s，日志条数: {self._log_count}")
+            self._run_started_at = None
         self.progress_label.setText(summary)
 
         InfoBar.success(

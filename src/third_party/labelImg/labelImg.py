@@ -1203,35 +1203,84 @@ class MainWindow(QMainWindow, WindowMixin):
         """
         return '[{} / {}]'.format(self.cur_img_idx + 1, self.img_count)
 
+    def _annotation_base_candidates(self, file_path):
+        if not file_path:
+            return []
+
+        normalized_file_path = ustr(os.path.abspath(file_path))
+        image_base = os.path.splitext(normalized_file_path)[0]
+        candidates = [image_base]
+
+        default_save_dir = ustr(self.default_save_dir) if self.default_save_dir is not None else ''
+        if default_save_dir:
+            default_save_dir = ustr(os.path.abspath(default_save_dir))
+            image_stem = os.path.splitext(os.path.basename(normalized_file_path))[0]
+
+            dir_name = getattr(self, 'dir_name', None)
+            if dir_name:
+                try:
+                    rel_dir = os.path.relpath(
+                        os.path.dirname(normalized_file_path),
+                        ustr(os.path.abspath(dir_name))
+                    )
+                except Exception:
+                    rel_dir = None
+
+                if rel_dir == '.':
+                    candidates.append(os.path.join(default_save_dir, image_stem))
+                elif rel_dir and not rel_dir.startswith('..') and not os.path.isabs(rel_dir):
+                    candidates.append(os.path.join(default_save_dir, rel_dir, image_stem))
+
+            # Backward compatibility for flat annotation directory layout.
+            candidates.append(os.path.join(default_save_dir, image_stem))
+
+        unique_candidates = []
+        for candidate in candidates:
+            normalized_candidate = ustr(os.path.normpath(candidate))
+            if normalized_candidate not in unique_candidates:
+                unique_candidates.append(normalized_candidate)
+
+        return unique_candidates
+
+    def _preferred_save_base_path(self, file_path):
+        candidates = self._annotation_base_candidates(file_path)
+        if not candidates:
+            return ''
+
+        default_save_dir = ustr(self.default_save_dir) if self.default_save_dir is not None else ''
+        if not default_save_dir:
+            return candidates[0]
+
+        normalized_default_dir = ustr(os.path.normcase(os.path.abspath(default_save_dir)))
+        for candidate in candidates:
+            normalized_candidate = ustr(os.path.normcase(os.path.abspath(candidate)))
+            if normalized_candidate == normalized_default_dir or normalized_candidate.startswith(normalized_default_dir + os.sep):
+                return candidate
+
+        return candidates[0]
+
     def show_bounding_box_from_annotation_file(self, file_path):
-        if self.default_save_dir is not None:
-            basename = os.path.basename(os.path.splitext(file_path)[0])
-            xml_path = os.path.join(self.default_save_dir, basename + XML_EXT)
-            txt_path = os.path.join(self.default_save_dir, basename + TXT_EXT)
-            json_path = os.path.join(self.default_save_dir, basename + JSON_EXT)
+        if not file_path:
+            return
 
-            """Annotation file priority:
-            PascalXML > YOLO
-            """
-            if os.path.isfile(xml_path):
-                self.load_pascal_xml_by_filename(xml_path)
-            elif os.path.isfile(txt_path):
-                self.load_yolo_txt_by_filename(txt_path)
-            elif os.path.isfile(json_path):
-                self.load_create_ml_json_by_filename(json_path, file_path)
+        # Annotation file priority: PascalXML > YOLO > CreateML JSON.
+        loaders = (
+            (XML_EXT, self.load_pascal_xml_by_filename),
+            (TXT_EXT, self.load_yolo_txt_by_filename),
+            (JSON_EXT, self.load_create_ml_json_by_filename),
+        )
 
-        else:
-            xml_path = os.path.splitext(file_path)[0] + XML_EXT
-            txt_path = os.path.splitext(file_path)[0] + TXT_EXT
-            json_path = os.path.splitext(file_path)[0] + JSON_EXT
+        for base_path in self._annotation_base_candidates(file_path):
+            for ext, loader in loaders:
+                annotation_path = base_path + ext
+                if not os.path.isfile(annotation_path):
+                    continue
 
-            if os.path.isfile(xml_path):
-                self.load_pascal_xml_by_filename(xml_path)
-            elif os.path.isfile(txt_path):
-                self.load_yolo_txt_by_filename(txt_path)
-            elif os.path.isfile(json_path):
-                self.load_create_ml_json_by_filename(json_path, file_path)
-            
+                if ext == JSON_EXT:
+                    loader(annotation_path, file_path)
+                else:
+                    loader(annotation_path)
+                return
 
     def resizeEvent(self, event):
         if self.canvas and not self.image.isNull()\
@@ -1494,9 +1543,7 @@ class MainWindow(QMainWindow, WindowMixin):
     def save_file(self, _value=False):
         if self.default_save_dir is not None and len(ustr(self.default_save_dir)):
             if self.file_path:
-                image_file_name = os.path.basename(self.file_path)
-                saved_file_name = os.path.splitext(image_file_name)[0]
-                saved_path = os.path.join(ustr(self.default_save_dir), saved_file_name)
+                saved_path = self._preferred_save_base_path(self.file_path)
                 self._save_file(saved_path)
         else:
             image_file_dir = os.path.dirname(self.file_path)

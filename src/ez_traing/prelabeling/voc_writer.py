@@ -2,9 +2,10 @@
 
 import sys
 import os
+import threading
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from PIL import Image
 
@@ -20,6 +21,10 @@ from libs.pascal_voc_io import PascalVocWriter
 
 class VOCAnnotationWriter:
     """VOC 标注文件写入器"""
+
+    _annotation_cache: Dict[Tuple[str, int], List[BoundingBox]] = {}
+    _image_size_cache: Dict[Tuple[str, int], Tuple[int, int, int]] = {}
+    _cache_lock = threading.Lock()
 
     @staticmethod
     def _deduplicate_boxes(boxes: List[BoundingBox]) -> List[BoundingBox]:
@@ -82,6 +87,18 @@ class VOCAnnotationWriter:
         if not path.exists():
             return []
 
+        path = path.resolve()
+        try:
+            mtime_ns = path.stat().st_mtime_ns
+        except OSError:
+            return []
+        cache_key = (str(path), mtime_ns)
+
+        with self._cache_lock:
+            cached = self._annotation_cache.get(cache_key)
+            if cached is not None:
+                return list(cached)
+
         root = ET.parse(path).getroot()
         boxes: List[BoundingBox] = []
         for obj in root.findall("object"):
@@ -107,6 +124,12 @@ class VOCAnnotationWriter:
                     confidence=1.0,
                 )
             )
+
+        with self._cache_lock:
+            stale_keys = [k for k in self._annotation_cache.keys() if k[0] == str(path) and k != cache_key]
+            for key in stale_keys:
+                self._annotation_cache.pop(key, None)
+            self._annotation_cache[cache_key] = boxes
         return boxes
 
     def save_merged_annotation(
@@ -138,9 +161,25 @@ class VOCAnnotationWriter:
         Returns:
             (height, width, depth) 元组
         """
-        with Image.open(image_path) as img:
+        path = Path(image_path).resolve()
+        mtime_ns = path.stat().st_mtime_ns
+        cache_key = (str(path), mtime_ns)
+
+        with self._cache_lock:
+            cached = self._image_size_cache.get(cache_key)
+            if cached is not None:
+                return cached
+
+        with Image.open(path) as img:
             width, height = img.size
             # RGB -> 3, L (grayscale) -> 1, RGBA -> 4, etc.
             mode_to_depth = {"1": 1, "L": 1, "P": 1, "RGB": 3, "RGBA": 4, "CMYK": 4}
             depth = mode_to_depth.get(img.mode, 3)
-        return (height, width, depth)
+        size = (height, width, depth)
+
+        with self._cache_lock:
+            stale_keys = [k for k in self._image_size_cache.keys() if k[0] == str(path) and k != cache_key]
+            for key in stale_keys:
+                self._image_size_cache.pop(key, None)
+            self._image_size_cache[cache_key] = size
+        return size

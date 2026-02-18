@@ -2,9 +2,11 @@
 
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional, Tuple
 
 from ez_traing.data_prep.models import AnnotationBox, DatasetSample
+
+_VOC_RAW_CACHE: Dict[Tuple[str, int], List[Tuple[str, float, float, float, float]]] = {}
 
 
 def load_existing_classes(dataset_root: Path) -> List[str]:
@@ -40,26 +42,47 @@ def find_voc_for_image(image_path: Path, dataset_root: Path) -> Optional[Path]:
 
 def parse_voc_boxes(xml_path: Path, image_width: int, image_height: int) -> List[AnnotationBox]:
     """解析 VOC XML 框。"""
+    xml_path = xml_path.resolve()
     try:
-        root = ET.parse(xml_path).getroot()
-    except Exception as e:
-        raise ValueError(f"解析 XML 失败: {xml_path} ({e})") from e
+        mtime_ns = xml_path.stat().st_mtime_ns
+    except OSError as e:
+        raise ValueError(f"读取 XML 失败: {xml_path} ({e})") from e
+
+    cache_key = (str(xml_path), mtime_ns)
+    cached_raw = _VOC_RAW_CACHE.get(cache_key)
+
+    if cached_raw is None:
+        # 删除该路径旧版本缓存，避免缓存无限增长。
+        stale_keys = [k for k in _VOC_RAW_CACHE.keys() if k[0] == str(xml_path) and k != cache_key]
+        for key in stale_keys:
+            _VOC_RAW_CACHE.pop(key, None)
+
+        raw_boxes: List[Tuple[str, float, float, float, float]] = []
+        try:
+            root = ET.parse(xml_path).getroot()
+        except Exception as e:
+            raise ValueError(f"解析 XML 失败: {xml_path} ({e})") from e
+
+        for obj in root.findall("object"):
+            label = (obj.findtext("name") or "").strip()
+            bnd = obj.find("bndbox")
+            if not label or bnd is None:
+                continue
+
+            try:
+                x_min = float((bnd.findtext("xmin") or "0").strip())
+                y_min = float((bnd.findtext("ymin") or "0").strip())
+                x_max = float((bnd.findtext("xmax") or "0").strip())
+                y_max = float((bnd.findtext("ymax") or "0").strip())
+            except ValueError:
+                continue
+            raw_boxes.append((label, x_min, y_min, x_max, y_max))
+
+        _VOC_RAW_CACHE[cache_key] = raw_boxes
+        cached_raw = raw_boxes
 
     boxes: List[AnnotationBox] = []
-    for obj in root.findall("object"):
-        label = (obj.findtext("name") or "").strip()
-        bnd = obj.find("bndbox")
-        if not label or bnd is None:
-            continue
-
-        try:
-            x_min = float((bnd.findtext("xmin") or "0").strip())
-            y_min = float((bnd.findtext("ymin") or "0").strip())
-            x_max = float((bnd.findtext("xmax") or "0").strip())
-            y_max = float((bnd.findtext("ymax") or "0").strip())
-        except ValueError:
-            continue
-
+    for label, x_min, y_min, x_max, y_max in cached_raw:
         x_min = max(0.0, min(x_min, float(image_width)))
         x_max = max(0.0, min(x_max, float(image_width)))
         y_min = max(0.0, min(y_min, float(image_height)))

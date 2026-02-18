@@ -6,6 +6,7 @@ import re
 import shutil
 from pathlib import Path
 from threading import local
+from time import perf_counter
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
 import numpy as np
@@ -38,6 +39,7 @@ class DataPrepPipeline:
         progress_callback: Optional[Callable[[int, str], None]] = None,
         is_cancelled: Optional[Callable[[], bool]] = None,
     ) -> DataPrepSummary:
+        started_at = perf_counter()
         self.config.validate()
         self._log(log_callback, f"开始数据准备: {self.config.dataset_name}")
 
@@ -50,9 +52,11 @@ class DataPrepPipeline:
             output_root, self.config.overwrite_output
         )
 
+        scan_started_at = perf_counter()
         samples, source_images, skipped_images = self._scan_samples(
             dataset_root, log_callback, is_cancelled
         )
+        self._log(log_callback, f"扫描耗时: {perf_counter() - scan_started_at:.2f}s")
         if not samples:
             raise ValueError("没有可处理样本，请确认目录下存在图片和 VOC XML 标注")
 
@@ -97,6 +101,7 @@ class DataPrepPipeline:
             classes_count=len(class_names),
         )
 
+        train_export_started_at = perf_counter()
         summary.train_images, summary.augmented_images, done_steps = self._export_split(
             split_name="train",
             samples=train_samples,
@@ -113,7 +118,9 @@ class DataPrepPipeline:
             is_cancelled=is_cancelled,
             augment_workers=augment_workers,
         )
+        self._log(log_callback, f"train 导出耗时: {perf_counter() - train_export_started_at:.2f}s")
 
+        val_export_started_at = perf_counter()
         val_images, val_aug_count, done_steps = self._export_split(
             split_name="val",
             samples=val_samples,
@@ -130,6 +137,7 @@ class DataPrepPipeline:
             is_cancelled=is_cancelled,
             augment_workers=augment_workers,
         )
+        self._log(log_callback, f"val 导出耗时: {perf_counter() - val_export_started_at:.2f}s")
         summary.val_images = val_images
         summary.augmented_images += val_aug_count
 
@@ -147,6 +155,7 @@ class DataPrepPipeline:
             progress_callback, 100, f"完成，导出 {summary.processed_images} 张图片"
         )
         self._log(log_callback, f"输出目录: {output_root}")
+        self._log(log_callback, f"总耗时: {perf_counter() - started_at:.2f}s")
         return summary
 
     def _scan_samples(
@@ -176,10 +185,14 @@ class DataPrepPipeline:
 
             xml_path = find_voc_for_image(path, dataset_root)
             boxes = []
+            width: Optional[int] = None
+            height: Optional[int] = None
+            mode: Optional[str] = None
             if xml_path is not None:
                 try:
                     with Image.open(path) as img:
                         width, height = img.size
+                        mode = img.mode
                     boxes = parse_voc_boxes(xml_path, width, height)
                 except Exception as e:
                     self._log(log_callback, f"[跳过] 标注解析失败 {xml_path.name}: {e}")
@@ -190,7 +203,16 @@ class DataPrepPipeline:
                 skipped_images += 1
                 continue
 
-            samples.append(DatasetSample(image_path=path, xml_path=xml_path, boxes=boxes))
+            samples.append(
+                DatasetSample(
+                    image_path=path,
+                    xml_path=xml_path,
+                    boxes=boxes,
+                    image_width=width,
+                    image_height=height,
+                    image_mode=mode,
+                )
+            )
 
         self._log(log_callback, f"有效样本: {len(samples)}，跳过: {skipped_images}")
         return samples, source_images, skipped_images
@@ -268,10 +290,8 @@ class DataPrepPipeline:
                 if is_cancelled and is_cancelled():
                     raise RuntimeError("任务已取消")
 
-                with Image.open(sample.image_path) as pil_img:
-                    image = pil_img.convert("RGB")
-                    image_array = np.array(image)
-                    width, height = image.size
+                width = sample.image_width
+                height = sample.image_height
 
                 base_stem = self._unique_stem(
                     self._make_stem(sample.image_path, dataset_root), used_names
@@ -282,7 +302,21 @@ class DataPrepPipeline:
 
                 out_img = image_dir / f"{base_stem}{base_ext}"
                 out_lbl = label_dir / f"{base_stem}.txt"
-                image.save(out_img)
+
+                if augmenter is None and base_ext in SUPPORTED_IMAGE_FORMATS:
+                    shutil.copy2(sample.image_path, out_img)
+                    if width is None or height is None:
+                        with Image.open(sample.image_path) as pil_img:
+                            width, height = pil_img.size
+                else:
+                    with Image.open(sample.image_path) as pil_img:
+                        image = pil_img.convert("RGB")
+                        if width is None or height is None:
+                            width, height = image.size
+                        image.save(out_img)
+
+                if width is None or height is None:
+                    raise ValueError(f"无法获取图片尺寸: {sample.image_path}")
                 write_yolo_label(out_lbl, sample.boxes, class_to_id, width, height)
                 output_count += 1
 
@@ -295,6 +329,9 @@ class DataPrepPipeline:
 
                 if augmenter is None:
                     continue
+
+                with Image.open(sample.image_path) as pil_img:
+                    image_array = np.array(pil_img.convert("RGB"))
 
                 if executor is not None and thread_state is not None:
                     augmented_items = self._augment_image_parallel(

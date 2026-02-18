@@ -1,5 +1,6 @@
 import os
 
+from PyQt5.QtWidgets import QVBoxLayout, QWidget
 from qfluentwidgets import FluentIcon as FIF
 from qfluentwidgets import FluentWindow, NavigationItemPosition
 
@@ -12,19 +13,44 @@ from ez_traing.pages.settings_page import SettingsPage
 from ez_traing.pages.train_page import TrainPage
 
 
+class LazyPageHost(QWidget):
+    """延迟创建页面容器，首次展示时再初始化真实页面。"""
+
+    def __init__(self, factory, parent=None):
+        super().__init__(parent)
+        self._factory = factory
+        self._page = None
+        self._layout = QVBoxLayout(self)
+        self._layout.setContentsMargins(0, 0, 0, 0)
+
+    def ensure_page(self):
+        if self._page is None:
+            self._page = self._factory()
+            self._layout.addWidget(self._page)
+        return self._page
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self.ensure_page()
+
+
 class AppWindow(FluentWindow):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("FluentLabel")
         self.resize(1280, 800)
 
-        self.annotation_page = AnnotationPage(self)
         self.dataset_page = DatasetPage(self)
         self.data_prep_page = DataPrepPage(self)
-        self.train_page = TrainPage(self)
         self.prelabeling_page = PrelabelingPage(self)
-        self.eval_page = EvalPage(self)
-        self.settings_page = SettingsPage(self)
+        self._annotation_page = None
+        self._train_page = None
+        self._eval_page = None
+        self._settings_page = None
+        self.annotation_page = LazyPageHost(self._create_annotation_page, self)
+        self.train_page = LazyPageHost(self._create_train_page, self)
+        self.eval_page = LazyPageHost(self._create_eval_page, self)
+        self.settings_page = LazyPageHost(self._create_settings_page, self)
 
         self.annotation_page.setObjectName("annotation")
         self.dataset_page.setObjectName("dataset")
@@ -55,8 +81,29 @@ class AppWindow(FluentWindow):
         # 连接数据集页面的标注联动信号
         self.dataset_page.request_annotation.connect(self._on_request_annotation)
 
+    def _create_annotation_page(self):
+        if self._annotation_page is None:
+            self._annotation_page = AnnotationPage(self)
+        return self._annotation_page
+
+    def _create_train_page(self):
+        if self._train_page is None:
+            self._train_page = TrainPage(self)
+        return self._train_page
+
+    def _create_eval_page(self):
+        if self._eval_page is None:
+            self._eval_page = EvalPage(self)
+        return self._eval_page
+
+    def _create_settings_page(self):
+        if self._settings_page is None:
+            self._settings_page = SettingsPage(self)
+        return self._settings_page
+
     def _annotation_window(self):
-        return getattr(self.annotation_page, "annotation_window", None)
+        annotation_page = self.annotation_page.ensure_page()
+        return getattr(annotation_page, "annotation_window", None)
 
     @property
     def file_path(self):

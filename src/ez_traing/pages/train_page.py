@@ -396,6 +396,11 @@ class LogPanel(CardWidget):
     
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._log_buffer: List[str] = []
+        self._log_flush_timer = QTimer(self)
+        self._log_flush_timer.setInterval(100)
+        self._log_flush_timer.timeout.connect(self._flush_logs)
+        self._last_progress_percent = -1
         self._init_ui()
     
     def _init_ui(self):
@@ -441,26 +446,41 @@ class LogPanel(CardWidget):
     def append_log(self, text: str):
         """追加日志"""
         text = _strip_ansi(text)
-        self.log_text.appendPlainText(text)
-        # 自动滚动到底部
+        self._log_buffer.append(text)
+        if not self._log_flush_timer.isActive():
+            self._log_flush_timer.start()
+
+    def _flush_logs(self):
+        if not self._log_buffer:
+            self._log_flush_timer.stop()
+            return
+        self.log_text.appendPlainText("\n".join(self._log_buffer))
+        self._log_buffer.clear()
         cursor = self.log_text.textCursor()
         cursor.movePosition(QTextCursor.End)
         self.log_text.setTextCursor(cursor)
+        self._log_flush_timer.stop()
     
     def set_progress(self, current: int, total: int):
         """设置进度"""
         if total > 0:
             percent = int(current / total * 100)
+            if percent == self._last_progress_percent:
+                return
+            self._last_progress_percent = percent
             self.progress_bar.setValue(percent)
             self.progress_label.setText(f"Epoch {current}/{total} ({percent}%)")
     
     def reset(self):
         """重置状态"""
+        self._last_progress_percent = -1
+        self._log_buffer.clear()
         self.progress_bar.setValue(0)
         self.progress_label.setText("等待训练开始...")
     
     def _clear_log(self):
         """清空日志"""
+        self._log_buffer.clear()
         self.log_text.clear()
 
 

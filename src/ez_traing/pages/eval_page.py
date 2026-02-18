@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Dict, Optional, List
 from datetime import datetime
 
-from PyQt5.QtCore import Qt, QThread, pyqtSignal
+from PyQt5.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt5.QtGui import QPixmap, QFont, QTextCursor
 from PyQt5.QtWidgets import (
     QWidget,
@@ -448,6 +448,11 @@ class EvalLogPanel(CardWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._log_buffer: List[str] = []
+        self._log_flush_timer = QTimer(self)
+        self._log_flush_timer.setInterval(100)
+        self._log_flush_timer.timeout.connect(self._flush_logs)
+        self._last_progress_value = -1
         self._init_ui()
 
     def _init_ui(self):
@@ -490,22 +495,38 @@ class EvalLogPanel(CardWidget):
     def append_log(self, text: str):
         text = _strip_ansi(text)
         timestamp = datetime.now().strftime("%H:%M:%S")
-        self.log_text.appendPlainText(f"[{timestamp}] {text}")
+        self._log_buffer.append(f"[{timestamp}] {text}")
+        if not self._log_flush_timer.isActive():
+            self._log_flush_timer.start()
+
+    def _flush_logs(self):
+        if not self._log_buffer:
+            self._log_flush_timer.stop()
+            return
+        self.log_text.appendPlainText("\n".join(self._log_buffer))
+        self._log_buffer.clear()
         cursor = self.log_text.textCursor()
         cursor.movePosition(QTextCursor.End)
         self.log_text.setTextCursor(cursor)
+        self._log_flush_timer.stop()
 
     def set_progress(self, value: int):
         value = max(0, min(100, int(value)))
+        if value == self._last_progress_value:
+            return
+        self._last_progress_value = value
         self.progress_bar.setValue(value)
         self.progress_label.setText(f"进度: {value}%")
 
     def reset(self):
+        self._last_progress_value = -1
+        self._log_buffer.clear()
         self.progress_bar.setValue(0)
         self.progress_label.setText("等待验证开始...")
         self.log_text.clear()
 
     def _clear_log(self):
+        self._log_buffer.clear()
         self.log_text.clear()
 
 

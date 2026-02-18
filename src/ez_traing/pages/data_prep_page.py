@@ -1,11 +1,13 @@
 """训练前数据准备页面。"""
 
+import json
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional
+from time import perf_counter
+from typing import Any, Dict, List, Optional
 
-from PyQt5.QtCore import QThread, Qt, pyqtSignal
+from PyQt5.QtCore import QThread, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QFont, QTextCursor
 from PyQt5.QtWidgets import QFileDialog, QGridLayout, QHBoxLayout, QVBoxLayout, QWidget
 from qfluentwidgets import (
@@ -75,6 +77,9 @@ class DataPrepWorker(QThread):
 class DataPrepPage(QWidget):
     """训练前数据准备页面。"""
 
+    _STATE_FILE = "data_prep_ui_state.json"
+    _DEFAULT_AUG_METHODS = {"hflip", "brightness_contrast", "gauss_noise"}
+
     _AUGMENTATION_HELP_TEXTS: Dict[str, str] = {
         "hflip": "作用：左右翻转，提升模型对目标左右朝向变化的鲁棒性。\n建议场景：目标本身左右对称或方向不敏感（如通用工业件、自然物体）。",
         "vflip": "作用：上下翻转，扩展垂直方向姿态分布。\n建议场景：拍摄方向可能颠倒或上下方向不重要时使用；若任务对上下方向敏感请谨慎开启。",
@@ -102,7 +107,19 @@ class DataPrepPage(QWidget):
         self._current_project_id: Optional[str] = None
         self._worker: Optional[DataPrepWorker] = None
         self._method_checkboxes: Dict[str, CheckBox] = {}
+        self._run_started_at: Optional[float] = None
+        self._last_progress_percent = -1
+        self._last_progress_update_at = 0.0
+        self._log_count = 0
+        self._log_buffer: List[str] = []
+        self._log_timer = QTimer(self)
+        self._log_timer.setInterval(100)
+        self._log_timer.timeout.connect(self._flush_log_buffer)
+        self._ui_state_path = Path.home() / ".ez_traing" / self._STATE_FILE
+        self._restoring_ui_state = False
         self._setup_ui()
+        self._bind_persistence_signals()
+        self._load_ui_state()
 
     def _setup_ui(self):
         main_layout = QVBoxLayout(self)
@@ -214,8 +231,8 @@ class DataPrepPage(QWidget):
         scope_layout = QHBoxLayout()
         scope_layout.addWidget(BodyLabel("增强作用范围", card))
         self.aug_scope_combo = ComboBox(card)
-        self.aug_scope_combo.addItem("仅训练集", "train")
-        self.aug_scope_combo.addItem("训练集 + 验证集", "both")
+        self.aug_scope_combo.addItem("仅训练集", userData="train")
+        self.aug_scope_combo.addItem("训练集 + 验证集", userData="both")
         scope_layout.addWidget(self.aug_scope_combo)
         scope_layout.addStretch()
         layout.addLayout(scope_layout)
@@ -237,7 +254,7 @@ class DataPrepPage(QWidget):
             method_row_layout.setSpacing(4)
 
             cb = CheckBox(display_name, method_row)
-            cb.setChecked(key in {"hflip", "brightness_contrast", "gauss_noise"})
+            cb.setChecked(key in self._DEFAULT_AUG_METHODS)
             method_row_layout.addWidget(cb)
 
             help_btn = PushButton("?", method_row)
@@ -338,7 +355,7 @@ class DataPrepPage(QWidget):
         header.addWidget(SubtitleLabel("日志", card))
         header.addStretch()
         clear_btn = PushButton("清空", card)
-        clear_btn.clicked.connect(lambda: self.log_edit.clear())
+        clear_btn.clicked.connect(self._clear_log)
         header.addWidget(clear_btn)
         layout.addLayout(header)
 
@@ -384,6 +401,7 @@ class DataPrepPage(QWidget):
             self._update_dataset_info(self._current_project_id)
 
         self.dataset_combo.blockSignals(False)
+        self._save_ui_state()
 
     def _on_dataset_changed(self, index: int):
         if index < 0 or index >= len(self._project_ids):
@@ -392,6 +410,7 @@ class DataPrepPage(QWidget):
             return
         self._current_project_id = self._project_ids[index]
         self._update_dataset_info(self._current_project_id)
+        self._save_ui_state()
 
     def _update_dataset_info(self, project_id: str):
         if self._project_manager is None:
@@ -433,6 +452,145 @@ class DataPrepPage(QWidget):
 
     def _selected_methods(self) -> List[str]:
         return [key for key, cb in self._method_checkboxes.items() if cb.isChecked()]
+
+    def _bind_persistence_signals(self) -> None:
+        self.train_ratio_spin.valueChanged.connect(self._save_ui_state)
+        self.seed_spin.valueChanged.connect(self._save_ui_state)
+        self.enable_aug_cb.toggled.connect(self._save_ui_state)
+        self.aug_count_spin.valueChanged.connect(self._save_ui_state)
+        self.aug_scope_combo.currentIndexChanged.connect(self._save_ui_state)
+        self.output_dir_edit.textChanged.connect(self._save_ui_state)
+        self.skip_unlabeled_cb.toggled.connect(self._save_ui_state)
+        self.overwrite_cb.toggled.connect(self._save_ui_state)
+        for cb in self._method_checkboxes.values():
+            cb.toggled.connect(self._save_ui_state)
+
+    def _ui_state_dir(self) -> Path:
+        state_dir = self._ui_state_path.parent
+        state_dir.mkdir(parents=True, exist_ok=True)
+        return state_dir
+
+    def _read_ui_state(self) -> Dict[str, Any]:
+        if not self._ui_state_path.exists():
+            return {}
+        try:
+            with open(self._ui_state_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return {}
+
+    @staticmethod
+    def _safe_int(value: Any, default: int, minimum: int, maximum: int) -> int:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return default
+        return max(minimum, min(maximum, parsed))
+
+    @staticmethod
+    def _safe_bool(value: Any, default: bool) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"1", "true", "yes", "on"}:
+                return True
+            if normalized in {"0", "false", "no", "off"}:
+                return False
+        return default
+
+    def _get_aug_scope(self) -> str:
+        scope = self.aug_scope_combo.currentData()
+        if scope in {"train", "both"}:
+            return scope
+        scope_text = self.aug_scope_combo.currentText()
+        return "both" if "验证" in scope_text else "train"
+
+    def _set_aug_scope(self, scope: str) -> None:
+        for idx in range(self.aug_scope_combo.count()):
+            if self.aug_scope_combo.itemData(idx) == scope:
+                self.aug_scope_combo.setCurrentIndex(idx)
+                return
+        self.aug_scope_combo.setCurrentIndex(0)
+
+    def _load_ui_state(self) -> None:
+        state = self._read_ui_state()
+        if not state:
+            return
+
+        self._restoring_ui_state = True
+        try:
+            project_id = state.get("project_id")
+            if isinstance(project_id, str) and project_id.strip():
+                self._current_project_id = project_id.strip()
+
+            self.train_ratio_spin.setValue(
+                self._safe_int(
+                    state.get("train_ratio"), default=80, minimum=50, maximum=95
+                )
+            )
+            self.seed_spin.setValue(
+                self._safe_int(
+                    state.get("random_seed"), default=42, minimum=0, maximum=999999
+                )
+            )
+            self.enable_aug_cb.setChecked(
+                self._safe_bool(state.get("enable_augmentation"), default=True)
+            )
+            self.aug_count_spin.setValue(
+                self._safe_int(state.get("augment_times"), default=1, minimum=1, maximum=10)
+            )
+            self._set_aug_scope(str(state.get("augment_scope", "train")))
+
+            selected_methods_raw = state.get("augment_methods")
+            if isinstance(selected_methods_raw, list):
+                selected_methods = {
+                    str(item) for item in selected_methods_raw if isinstance(item, str)
+                }
+                for key, cb in self._method_checkboxes.items():
+                    cb.setChecked(key in selected_methods)
+
+            output_dir = state.get("output_dir")
+            if isinstance(output_dir, str) and output_dir.strip():
+                self.output_dir_edit.setText(output_dir.strip())
+
+            self.skip_unlabeled_cb.setChecked(
+                self._safe_bool(state.get("skip_unlabeled"), default=True)
+            )
+            self.overwrite_cb.setChecked(
+                self._safe_bool(state.get("overwrite_output"), default=True)
+            )
+        finally:
+            self._restoring_ui_state = False
+
+        self._update_ratio_hint()
+        self._update_aug_hint()
+        self._on_aug_toggled(self.enable_aug_cb.isChecked())
+
+    def _save_ui_state(self) -> None:
+        if self._restoring_ui_state:
+            return
+        state = {
+            "project_id": self._current_project_id,
+            "train_ratio": self.train_ratio_spin.value(),
+            "random_seed": self.seed_spin.value(),
+            "enable_augmentation": self.enable_aug_cb.isChecked(),
+            "augment_times": self.aug_count_spin.value(),
+            "augment_scope": self._get_aug_scope(),
+            "augment_methods": self._selected_methods(),
+            "output_dir": self.output_dir_edit.text().strip(),
+            "skip_unlabeled": self.skip_unlabeled_cb.isChecked(),
+            "overwrite_output": self.overwrite_cb.isChecked(),
+        }
+        try:
+            self._ui_state_dir()
+            with open(self._ui_state_path, "w", encoding="utf-8") as f:
+                json.dump(state, f, ensure_ascii=False, indent=2)
+        except OSError:
+            return
 
     def _browse_output_dir(self):
         current = self.output_dir_edit.text().strip() or _get_default_output_dir()
@@ -501,7 +659,7 @@ class DataPrepPage(QWidget):
                 )
                 return
             augment_times = self.aug_count_spin.value()
-            augment_scope = self.aug_scope_combo.currentData()
+            augment_scope = self._get_aug_scope()
 
         config = DataPrepConfig(
             dataset_name=project.name,
@@ -524,6 +682,10 @@ class DataPrepPage(QWidget):
         self.progress_bar.setValue(0)
         self.progress_label.setText("正在准备数据...")
         self._set_running_state(True)
+        self._run_started_at = perf_counter()
+        self._last_progress_percent = -1
+        self._last_progress_update_at = 0.0
+        self._log_count = 0
         self._log("任务启动")
         self._worker.start()
 
@@ -532,6 +694,15 @@ class DataPrepPage(QWidget):
             self._worker.cancel()
 
     def _on_progress(self, percent: int, text: str):
+        now = perf_counter()
+        should_update = (
+            percent != self._last_progress_percent
+            or now - self._last_progress_update_at >= 0.2
+        )
+        if not should_update:
+            return
+        self._last_progress_percent = percent
+        self._last_progress_update_at = now
         self.progress_bar.setValue(percent)
         self.progress_label.setText(text)
 
@@ -563,6 +734,10 @@ class DataPrepPage(QWidget):
                 parent=self.window(),
                 position=InfoBarPosition.TOP,
             )
+        if self._run_started_at is not None:
+            elapsed = perf_counter() - self._run_started_at
+            self._log(f"运行耗时: {elapsed:.2f}s，日志条数: {self._log_count}")
+            self._run_started_at = None
         self._worker = None
 
     def _set_running_state(self, running: bool):
@@ -583,7 +758,21 @@ class DataPrepPage(QWidget):
 
     def _log(self, text: str):
         timestamp = datetime.now().strftime("%H:%M:%S")
-        self.log_edit.append(f"[{timestamp}] {text}")
+        self._log_buffer.append(f"[{timestamp}] {text}")
+        self._log_count += 1
+        if not self._log_timer.isActive():
+            self._log_timer.start()
+
+    def _flush_log_buffer(self):
+        if not self._log_buffer:
+            self._log_timer.stop()
+            return
+        chunk = "\n".join(self._log_buffer)
+        self._log_buffer.clear()
+        self.log_edit.append(chunk)
         cursor = self.log_edit.textCursor()
         cursor.movePosition(QTextCursor.End)
         self.log_edit.setTextCursor(cursor)
+        self._log_timer.stop()    def _clear_log(self):
+        self._log_buffer.clear()
+        self.log_edit.clear()

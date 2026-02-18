@@ -23,6 +23,9 @@ class DatasetSample:
     image_path: Path
     xml_path: Optional[Path]
     boxes: List[AnnotationBox] = field(default_factory=list)
+    image_width: Optional[int] = None
+    image_height: Optional[int] = None
+    image_mode: Optional[str] = None
 
 
 @dataclass

@@ -5,7 +5,8 @@ import json
 import logging
 import re
 from pathlib import Path
-from typing import List, Tuple
+from time import perf_counter
+from typing import Dict, List, Tuple
 
 import requests
 
@@ -33,6 +34,7 @@ class VisionModelService:
 
     def __init__(self, config_manager: APIConfigManager):
         self._config_manager = config_manager
+        self._reference_encode_cache: Dict[Tuple[str, int], Tuple[str, str]] = {}
 
     def encode_image_base64(self, image_path: str) -> Tuple[str, str]:
         """将图片文件读取并编码为 base64 格式。
@@ -81,13 +83,37 @@ class VisionModelService:
         Returns:
             成功编码的 (base64_data, mime_type) 元组列表
         """
+        started_at = perf_counter()
         encoded: List[Tuple[str, str]] = []
+        cache_hits = 0
         for path in image_paths:
             try:
+                file_path = Path(path).resolve()
+                mtime_ns = file_path.stat().st_mtime_ns
+                cache_key = (str(file_path), mtime_ns)
+                cached = self._reference_encode_cache.get(cache_key)
+                if cached is not None:
+                    encoded.append(cached)
+                    cache_hits += 1
+                    continue
+
                 result = self.encode_image_base64(path)
                 encoded.append(result)
+                stale_keys = [
+                    k for k in self._reference_encode_cache.keys()
+                    if k[0] == str(file_path) and k != cache_key
+                ]
+                for key in stale_keys:
+                    self._reference_encode_cache.pop(key, None)
+                self._reference_encode_cache[cache_key] = result
             except (FileNotFoundError, ValueError, OSError) as e:
                 logger.warning("参考图片编码失败，已跳过 %s: %s", path, e)
+        logger.info(
+            "参考图片编码完成: %d 张，缓存命中 %d，耗时 %.3fs",
+            len(encoded),
+            cache_hits,
+            perf_counter() - started_at,
+        )
         return encoded
 
     def generate_reference_prompt(
