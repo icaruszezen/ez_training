@@ -5,6 +5,7 @@ from qfluentwidgets import FluentIcon as FIF
 from qfluentwidgets import FluentWindow, NavigationItemPosition
 
 from ez_traing.pages.annotation_page import AnnotationPage
+from ez_traing.pages.batch_annotation_page import BatchAnnotationPage
 from ez_traing.pages.data_prep_page import DataPrepPage
 from ez_traing.pages.dataset_page import DatasetPage
 from ez_traing.pages.eval_page import EvalPage
@@ -44,15 +45,18 @@ class AppWindow(FluentWindow):
         self.data_prep_page = DataPrepPage(self)
         self.prelabeling_page = PrelabelingPage(self)
         self._annotation_page = None
+        self._batch_annotation_page = None
         self._train_page = None
         self._eval_page = None
         self._settings_page = None
         self.annotation_page = LazyPageHost(self._create_annotation_page, self)
+        self.batch_annotation_page = LazyPageHost(self._create_batch_annotation_page, self)
         self.train_page = LazyPageHost(self._create_train_page, self)
         self.eval_page = LazyPageHost(self._create_eval_page, self)
         self.settings_page = LazyPageHost(self._create_settings_page, self)
 
         self.annotation_page.setObjectName("annotation")
+        self.batch_annotation_page.setObjectName("batch_annotation")
         self.dataset_page.setObjectName("dataset")
         self.data_prep_page.setObjectName("data_prep")
         self.train_page.setObjectName("train")
@@ -63,6 +67,7 @@ class AppWindow(FluentWindow):
         self.addSubInterface(self.dataset_page, FIF.FOLDER, "数据集")
         self.addSubInterface(self.prelabeling_page, FIF.TAG, "预标注")
         self.addSubInterface(self.annotation_page, FIF.PHOTO, "标注")
+        self.addSubInterface(self.batch_annotation_page, FIF.COPY, "批量标注")
         self.addSubInterface(self.data_prep_page, FIF.DOCUMENT, "数据准备")
         self.addSubInterface(self.train_page, FIF.ROBOT, "训练")
         self.addSubInterface(self.eval_page, FIF.COMPLETED, "验证")
@@ -73,18 +78,26 @@ class AppWindow(FluentWindow):
             NavigationItemPosition.BOTTOM,
         )
 
-        # 共享 ProjectManager 给预标注页面
+        # 共享 ProjectManager
         self.prelabeling_page.set_project_manager(self.dataset_page.project_manager)
-        # 共享 ProjectManager 给数据准备页面
         self.data_prep_page.set_project_manager(self.dataset_page.project_manager)
 
         # 连接数据集页面的标注联动信号
         self.dataset_page.request_annotation.connect(self._on_request_annotation)
+        self.dataset_page.request_batch_annotation.connect(self._on_request_batch_annotation)
 
     def _create_annotation_page(self):
         if self._annotation_page is None:
             self._annotation_page = AnnotationPage(self)
         return self._annotation_page
+
+    def _create_batch_annotation_page(self):
+        if self._batch_annotation_page is None:
+            self._batch_annotation_page = BatchAnnotationPage(self)
+            self._batch_annotation_page.set_project_manager(
+                self.dataset_page.project_manager
+            )
+        return self._batch_annotation_page
 
     def _create_train_page(self):
         if self._train_page is None:
@@ -120,21 +133,26 @@ class AppWindow(FluentWindow):
         if not image_path or not os.path.exists(image_path):
             return
 
-        # 切换到标注页面
         self.switchTo(self.annotation_page)
 
-        # 打开项目文件夹和图片进行标注
         annotation_window = self._annotation_window()
         if annotation_window:
-            # 先导入整个目录的图片
             if directory and os.path.isdir(directory):
-                # 检查是否需要重新加载目录（如果目录已经加载，避免重复加载）
                 current_dir = getattr(annotation_window, "dir_name", None)
                 if current_dir != directory:
                     annotation_window.import_dir_images(directory)
                     annotation_window.default_save_dir = directory
-            
-            # 然后加载指定的图片（会自动在列表中高亮定位）
             annotation_window.load_file(image_path)
+
+    def _on_request_batch_annotation(self, directory: str, image_paths: list):
+        """处理数据集页面的批量标注请求"""
+        if not image_paths:
+            return
+
+        self.switchTo(self.batch_annotation_page)
+
+        page = self.batch_annotation_page.ensure_page()
+        if page:
+            page.load_images(directory, image_paths)
 
 

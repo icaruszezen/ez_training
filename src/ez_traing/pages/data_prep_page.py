@@ -773,6 +773,8 @@ class DataPrepPage(QWidget):
         cursor = self.log_edit.textCursor()
         cursor.movePosition(QTextCursor.End)
         self.log_edit.setTextCursor(cursor)
-        self._log_timer.stop()    def _clear_log(self):
+        self._log_timer.stop()
+
+    def _clear_log(self):
         self._log_buffer.clear()
         self.log_edit.clear()

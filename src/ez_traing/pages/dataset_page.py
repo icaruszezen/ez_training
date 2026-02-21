@@ -797,18 +797,19 @@ class ImageListPanel(CardWidget):
     image_selected = pyqtSignal(str)  # image_path
     image_double_clicked = pyqtSignal(str)  # image_path
     filters_changed = pyqtSignal(str, str)  # annotation_filter, type_filter
+    page_changed = pyqtSignal(list)  # 当前页的路径列表
     
-    BATCH_SIZE = 50  # 每批添加的图片数量
+    PAGE_SIZE = 200
     
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._setup_ui()
         self._thumbnail_cache = {}
-        self._path_to_item = {}  # 路径到 item 的映射，加速查找
-        self._pending_paths = []  # 待添加的路径
+        self._path_to_item = {}
         self._placeholder_pixmap = None
-        self._add_timer = QTimer(self)
-        self._add_timer.timeout.connect(self._add_batch)
+        self._all_paths: List[str] = []
+        self._current_page = 0
+        self._total_pages = 0
+        self._setup_ui()
     
     def _setup_ui(self):
         layout = QVBoxLayout(self)
@@ -848,7 +849,7 @@ class ImageListPanel(CardWidget):
         self.image_list.setIconSize(QSize(120, 120))
         self.image_list.setSpacing(10)
         self.image_list.setResizeMode(QListWidget.Adjust)
-        self.image_list.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.image_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.image_list.setMovement(QListWidget.Static)
         self.image_list.setUniformItemSizes(True)  # 优化：统一项目大小
         self.image_list.setStyleSheet("""
@@ -874,41 +875,57 @@ class ImageListPanel(CardWidget):
         self.image_list.itemSelectionChanged.connect(self._on_selection_changed)
         self.image_list.itemDoubleClicked.connect(self._on_item_double_clicked)
         layout.addWidget(self.image_list, 1)
+        
+        # 分页控件
+        page_layout = QHBoxLayout()
+        page_layout.setSpacing(8)
+        page_layout.addStretch()
+        self.prev_page_btn = PushButton("上一页", self, FIF.LEFT_ARROW)
+        self.prev_page_btn.setFixedHeight(30)
+        self.prev_page_btn.clicked.connect(self._on_prev_page)
+        page_layout.addWidget(self.prev_page_btn)
+        self.page_label = CaptionLabel("第 0/0 页")
+        page_layout.addWidget(self.page_label)
+        self.next_page_btn = PushButton("下一页", self, FIF.RIGHT_ARROW)
+        self.next_page_btn.setFixedHeight(30)
+        self.next_page_btn.clicked.connect(self._on_next_page)
+        page_layout.addWidget(self.next_page_btn)
+        page_layout.addStretch()
+        layout.addLayout(page_layout)
     
     def set_images(self, image_paths: List[str], reset_cache: bool = False):
-        """设置图片列表 - 分批添加避免卡顿"""
-        self._add_timer.stop()
+        """设置图片列表（分页模式，仅显示当前页）"""
         self.image_list.clear()
         self._path_to_item.clear()
         if reset_cache:
             self._thumbnail_cache.clear()
         
-        count = len(image_paths)
-        self.count_label.setText(f"共 {count} 张图片")
+        self._all_paths = list(image_paths)
+        total = len(self._all_paths)
+        self._total_pages = max(1, (total + self.PAGE_SIZE - 1) // self.PAGE_SIZE) if total else 0
+        self._current_page = 0
         
-        if count == 0:
-            return
-        
-        # 准备占位图
         if self._placeholder_pixmap is None:
             self._placeholder_pixmap = self._create_placeholder_pixmap()
         
-        # 分批添加
-        self._pending_paths = list(image_paths)
-        self._add_timer.start(10)  # 每 10ms 添加一批
-    
-    def _add_batch(self):
-        """添加一批图片项"""
-        if not self._pending_paths:
-            self._add_timer.stop()
+        if total == 0:
+            self.count_label.setText("共 0 张图片")
+            self._update_page_controls()
             return
         
-        # 取出一批
-        batch = self._pending_paths[:self.BATCH_SIZE]
-        self._pending_paths = self._pending_paths[self.BATCH_SIZE:]
+        self._show_page(0)
+    
+    def _show_page(self, page: int):
+        """显示指定页的图片"""
+        self._current_page = page
+        self.image_list.clear()
+        self._path_to_item.clear()
         
-        # 批量添加
-        for path in batch:
+        start = page * self.PAGE_SIZE
+        end = min(start + self.PAGE_SIZE, len(self._all_paths))
+        page_paths = self._all_paths[start:end]
+        
+        for path in page_paths:
             item = QListWidgetItem()
             cached = self._thumbnail_cache.get(path)
             if cached:
@@ -921,9 +938,30 @@ class ImageListPanel(CardWidget):
             self.image_list.addItem(item)
             self._path_to_item[path] = item
         
-        # 如果添加完成，停止定时器
-        if not self._pending_paths:
-            self._add_timer.stop()
+        total = len(self._all_paths)
+        self.count_label.setText(
+            f"共 {total} 张图片 (第 {page + 1}/{self._total_pages} 页)"
+        )
+        self._update_page_controls()
+        self.page_changed.emit(page_paths)
+    
+    def _update_page_controls(self):
+        """更新分页按钮和标签状态"""
+        has_pages = self._total_pages > 0
+        self.prev_page_btn.setEnabled(has_pages and self._current_page > 0)
+        self.next_page_btn.setEnabled(has_pages and self._current_page < self._total_pages - 1)
+        if has_pages:
+            self.page_label.setText(f"第 {self._current_page + 1}/{self._total_pages} 页")
+        else:
+            self.page_label.setText("第 0/0 页")
+    
+    def _on_prev_page(self):
+        if self._current_page > 0:
+            self._show_page(self._current_page - 1)
+    
+    def _on_next_page(self):
+        if self._current_page < self._total_pages - 1:
+            self._show_page(self._current_page + 1)
     
     def update_thumbnail(self, path: str, pixmap: QPixmap):
         """更新缩略图 - 使用字典快速查找"""
@@ -935,12 +973,14 @@ class ImageListPanel(CardWidget):
     
     def clear(self):
         """清空列表"""
-        self._add_timer.stop()
-        self._pending_paths.clear()
         self.image_list.clear()
         self._thumbnail_cache.clear()
         self._path_to_item.clear()
+        self._all_paths.clear()
+        self._current_page = 0
+        self._total_pages = 0
         self.count_label.setText("共 0 张图片")
+        self._update_page_controls()
         self.reset_filters()
         self.set_type_options([])
 
@@ -999,12 +1039,18 @@ class ImageListPanel(CardWidget):
             return items[0].data(Qt.UserRole)
         return None
 
+    def get_selected_paths(self) -> List[str]:
+        """获取所有选中的图片路径"""
+        return [item.data(Qt.UserRole) for item in self.image_list.selectedItems()]
+
 
 class DatasetPage(QWidget):
     """数据集管理页面"""
     
     # 信号：请求打开图片进行标注 (目录路径, 图片路径)
     request_annotation = pyqtSignal(str, str)  # directory, image_path
+    # 信号：请求批量标注 (目录路径, 图片路径列表)
+    request_batch_annotation = pyqtSignal(str, list)  # directory, image_paths
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1015,6 +1061,8 @@ class DatasetPage(QWidget):
         self.filtered_image_paths: List[str] = []
         self._scanner: Optional[ImageScanner] = None
         self._thumbnail_loader: Optional[ThumbnailLoader] = None
+        self._page_thumb_total = 0
+        self._page_thumb_loaded = 0
         
         self._setup_ui()
         self._load_projects()
@@ -1048,6 +1096,7 @@ class DatasetPage(QWidget):
         self.image_list_panel.image_selected.connect(self._on_image_selected)
         self.image_list_panel.image_double_clicked.connect(self._on_image_double_clicked)
         self.image_list_panel.filters_changed.connect(self._on_filters_changed)
+        self.image_list_panel.page_changed.connect(self._load_page_thumbnails)
         content_splitter.addWidget(self.image_list_panel)
         
         # 右侧：统计和预览（垂直分割）
@@ -1103,6 +1152,12 @@ class DatasetPage(QWidget):
         self.annotate_btn.setEnabled(False)
         self.annotate_btn.clicked.connect(self._on_annotate_clicked)
         layout.addWidget(self.annotate_btn)
+        
+        # 批量标注按钮
+        self.batch_annotate_btn = PushButton("批量标注", self, FIF.COPY)
+        self.batch_annotate_btn.setEnabled(False)
+        self.batch_annotate_btn.clicked.connect(self._on_batch_annotate_clicked)
+        layout.addWidget(self.batch_annotate_btn)
         
         return header
     
@@ -1186,6 +1241,7 @@ class DatasetPage(QWidget):
                 self.statistics_panel.clear()
                 self.refresh_btn.setEnabled(False)
                 self.annotate_btn.setEnabled(False)
+                self.batch_annotate_btn.setEnabled(False)
                 self.status_label.setText("选择或创建数据集项目")
             
             InfoBar.success(
@@ -1291,16 +1347,37 @@ class DatasetPage(QWidget):
             )
             return
         
-        # 更新筛选项与图片列表
+        # 更新筛选项与图片列表（set_images -> _show_page -> page_changed -> _load_page_thumbnails）
         image_types = sorted({info.image_type for info in self.image_infos if info.image_type})
         self.image_list_panel.set_type_options(image_types)
         self._apply_filters()
-        self.status_label.setText(f"扫描完成，共 {count} 张图片，正在加载缩略图...")
+    
+    def _load_page_thumbnails(self, page_paths: List[str]):
+        """加载当前页的缩略图"""
+        if self._thumbnail_loader:
+            if self._thumbnail_loader.isRunning():
+                self._thumbnail_loader.cancel()
+                self._thumbnail_loader.wait()
+            try:
+                self._thumbnail_loader.thumbnail_loaded.disconnect(self._on_thumbnail_loaded)
+                self._thumbnail_loader.all_loaded.disconnect(self._on_page_thumbnails_loaded)
+            except TypeError:
+                pass
+            self._thumbnail_loader = None
         
-        # 启动缩略图加载
-        self._thumbnail_loader = ThumbnailLoader(self.image_paths)
+        uncached = [p for p in page_paths if p not in self.image_list_panel._thumbnail_cache]
+        if not uncached:
+            self.progress_bar.setVisible(False)
+            self._update_status_after_load()
+            return
+        
+        self._page_thumb_total = len(uncached)
+        self._page_thumb_loaded = 0
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setValue(0)
+        self._thumbnail_loader = ThumbnailLoader(uncached)
         self._thumbnail_loader.thumbnail_loaded.connect(self._on_thumbnail_loaded)
-        self._thumbnail_loader.all_loaded.connect(self._on_thumbnails_all_loaded)
+        self._thumbnail_loader.all_loaded.connect(self._on_page_thumbnails_loaded)
         self._thumbnail_loader.start()
     
     def _on_thumbnail_loaded(self, path: str, image: QImage):
@@ -1308,27 +1385,25 @@ class DatasetPage(QWidget):
         pixmap = QPixmap.fromImage(image)
         self.image_list_panel.update_thumbnail(path, pixmap)
         
-        # 更新进度
-        loaded = len(self.image_list_panel._thumbnail_cache)
-        total = len(self.image_paths)
-        if total > 0:
-            self.progress_bar.setValue(int(loaded / total * 100))
+        self._page_thumb_loaded += 1
+        if self._page_thumb_total > 0:
+            self.progress_bar.setValue(int(self._page_thumb_loaded / self._page_thumb_total * 100))
     
-    def _on_thumbnails_all_loaded(self):
-        """所有缩略图加载完成"""
+    def _on_page_thumbnails_loaded(self):
+        """当前页缩略图加载完成"""
         self.progress_bar.setVisible(False)
-        project_name = self.current_project.name if self.current_project else ""
-        self.status_label.setText(f"{project_name}: 已加载 {len(self.image_paths)} 张图片")
-        
-        InfoBar.success(
-            title="完成",
-            content=f"成功加载 {len(self.image_paths)} 张图片",
-            orient=Qt.Horizontal,
-            isClosable=True,
-            position=InfoBarPosition.TOP,
-            duration=3000,
-            parent=self
-        )
+        self._update_status_after_load()
+    
+    def _update_status_after_load(self):
+        """缩略图加载后更新状态栏"""
+        if self.current_project:
+            panel = self.image_list_panel
+            total = len(self.filtered_image_paths)
+            page = panel._current_page + 1
+            pages = panel._total_pages
+            self.status_label.setText(
+                f"{self.current_project.name}: 筛选后 {total} 张，第 {page}/{pages} 页"
+            )
 
     def _on_filters_changed(self, annotation_filter: str, image_type_filter: str):
         """筛选变化"""
@@ -1354,16 +1429,14 @@ class DatasetPage(QWidget):
         self.image_list_panel.set_images(self.filtered_image_paths)
         self.preview_widget.set_image(None)
         self.annotate_btn.setEnabled(False)
-
-        if self.current_project:
-            self.status_label.setText(
-                f"{self.current_project.name}: 共 {len(self.image_paths)} 张，筛选后 {len(self.filtered_image_paths)} 张"
-            )
+        self.batch_annotate_btn.setEnabled(False)
     
     def _on_image_selected(self, image_path: str):
         """图片选择"""
         self.preview_widget.set_image(image_path)
         self.annotate_btn.setEnabled(True)
+        selected_count = len(self.image_list_panel.get_selected_paths())
+        self.batch_annotate_btn.setEnabled(selected_count >= 2)
     
     def _on_image_double_clicked(self, image_path: str):
         """图片双击"""
@@ -1374,6 +1447,27 @@ class DatasetPage(QWidget):
         path = self.image_list_panel.get_selected_path()
         if path:
             self._open_for_annotation(path)
+    
+    def _on_batch_annotate_clicked(self):
+        """打开批量标注"""
+        paths = self.image_list_panel.get_selected_paths()
+        if len(paths) < 2:
+            InfoBar.warning(
+                title="提示",
+                content="请至少选择2张图片进行批量标注",
+                orient=Qt.Horizontal,
+                isClosable=True,
+                position=InfoBarPosition.TOP,
+                duration=3000,
+                parent=self,
+            )
+            return
+        directory = ""
+        if self.current_project:
+            directory = self.current_project.directory
+        else:
+            directory = str(Path(paths[0]).parent)
+        self.request_batch_annotation.emit(directory, paths)
     
     def _open_for_annotation(self, image_path: str):
         """打开图片进行标注"""

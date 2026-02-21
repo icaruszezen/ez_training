@@ -21,9 +21,6 @@ from PyQt5.QtWidgets import (
     QPlainTextEdit,
     QAbstractItemView,
     QLabel,
-    QDoubleSpinBox,
-    QScrollArea,
-    QFrame,
     QApplication,
 )
 from qfluentwidgets import (
@@ -40,7 +37,9 @@ from qfluentwidgets import (
     InfoBarPosition,
     ComboBox,
     SpinBox,
+    DoubleSpinBox,
     ProgressBar,
+    ScrollArea,
 )
 
 from ez_traing.evaluation.engine import EvaluationEngine
@@ -171,17 +170,38 @@ class EvalConfigPanel(CardWidget):
         train_box_layout.setContentsMargins(0, 0, 0, 0)
         train_box_layout.setSpacing(8)
 
+        _list_style = """
+            QListWidget {
+                border: 1px solid #e0e0e0;
+                border-radius: 6px;
+                background-color: #fafafa;
+            }
+            QListWidget::item {
+                padding: 8px;
+                border-bottom: 1px solid #f0f0f0;
+            }
+            QListWidget::item:selected {
+                background-color: #e3f2fd;
+                color: #1976d2;
+            }
+            QListWidget::item:hover {
+                background-color: #f5f5f5;
+            }
+        """
+
         train_box_layout.addWidget(CaptionLabel("训练记录", self))
         self.run_list = QListWidget(self)
         self.run_list.setSelectionMode(QAbstractItemView.SingleSelection)
         self.run_list.itemSelectionChanged.connect(self._on_run_selected)
         self.run_list.setMaximumHeight(120)
+        self.run_list.setStyleSheet(_list_style)
         train_box_layout.addWidget(self.run_list)
 
         train_box_layout.addWidget(CaptionLabel("权重文件", self))
         self.weight_list = QListWidget(self)
         self.weight_list.setSelectionMode(QAbstractItemView.SingleSelection)
         self.weight_list.setMaximumHeight(100)
+        self.weight_list.setStyleSheet(_list_style)
         train_box_layout.addWidget(self.weight_list)
 
         self.refresh_runs_btn = TransparentPushButton("刷新训练记录", self)
@@ -226,7 +246,7 @@ class EvalConfigPanel(CardWidget):
 
         conf_layout = QHBoxLayout()
         conf_layout.addWidget(BodyLabel("Conf:", self))
-        self.conf_spin = QDoubleSpinBox(self)
+        self.conf_spin = DoubleSpinBox(self)
         self.conf_spin.setRange(0.01, 1.0)
         self.conf_spin.setSingleStep(0.01)
         self.conf_spin.setDecimals(2)
@@ -236,7 +256,7 @@ class EvalConfigPanel(CardWidget):
 
         iou_layout = QHBoxLayout()
         iou_layout.addWidget(BodyLabel("IoU:", self))
-        self.iou_spin = QDoubleSpinBox(self)
+        self.iou_spin = DoubleSpinBox(self)
         self.iou_spin.setRange(0.01, 1.0)
         self.iou_spin.setSingleStep(0.01)
         self.iou_spin.setDecimals(2)
@@ -576,15 +596,7 @@ class EvalResultPanel(CardWidget):
         header_layout.addWidget(self.copy_metrics_btn)
         layout.addLayout(header_layout)
 
-        metrics_card = QFrame(self)
-        metrics_card.setStyleSheet(
-            """
-            QFrame {
-                background-color: #f8f9fa;
-                border-radius: 8px;
-            }
-        """
-        )
+        metrics_card = CardWidget(self)
         grid = QHBoxLayout(metrics_card)
         grid.setContentsMargins(12, 12, 12, 12)
         grid.setSpacing(16)
@@ -604,9 +616,10 @@ class EvalResultPanel(CardWidget):
         layout.addWidget(metrics_card)
 
         layout.addWidget(CaptionLabel("图表预览", self))
-        self.chart_scroll = QScrollArea(self)
+        self.chart_scroll = ScrollArea(self)
         self.chart_scroll.setWidgetResizable(True)
         self.chart_scroll.setMinimumHeight(260)
+        self.chart_scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
         self.chart_container = QWidget(self)
         self.chart_layout = QVBoxLayout(self.chart_container)
         self.chart_layout.setContentsMargins(8, 8, 8, 8)
