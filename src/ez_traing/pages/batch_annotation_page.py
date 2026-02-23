@@ -370,6 +370,10 @@ class BatchImageListPanel(CardWidget):
         sel_layout.addStretch()
         layout.addLayout(sel_layout)
 
+    @staticmethod
+    def _norm(path: str) -> str:
+        return os.path.normcase(os.path.abspath(path))
+
     def set_images(self, paths: List[str]):
         """设置图片列表"""
         self._stop_thumbnail_loader()
@@ -391,7 +395,7 @@ class BatchImageListPanel(CardWidget):
             item.setToolTip(path)
             item.setSizeHint(QSize(0, 68))
             self.image_list.addItem(item)
-            self._path_to_item[path] = item
+            self._path_to_item[self._norm(path)] = item
 
         self._update_count_label()
         self._load_thumbnails()
@@ -407,7 +411,7 @@ class BatchImageListPanel(CardWidget):
     def _on_thumbnail_loaded(self, path: str, image: QImage):
         pixmap = QPixmap.fromImage(image)
         self._thumbnail_cache[path] = pixmap
-        item = self._path_to_item.get(path)
+        item = self._path_to_item.get(self._norm(path))
         if item:
             item.setIcon(QIcon(pixmap))
 
@@ -421,7 +425,7 @@ class BatchImageListPanel(CardWidget):
         """将分辨率不匹配的图片标红"""
         self._mismatch_paths.update(paths)
         for path in paths:
-            item = self._path_to_item.get(path)
+            item = self._path_to_item.get(self._norm(path))
             if item:
                 item.setBackground(QBrush(_COLOR_MISMATCH))
                 current = item.text()
@@ -433,7 +437,7 @@ class BatchImageListPanel(CardWidget):
         if path in self._mismatch_paths:
             return
         self._success_paths.add(path)
-        item = self._path_to_item.get(path)
+        item = self._path_to_item.get(self._norm(path))
         if item:
             item.setBackground(QBrush(_COLOR_SUCCESS))
 
@@ -537,9 +541,21 @@ class BatchImageListPanel(CardWidget):
         """编程方式选中指定路径"""
         self.image_list.clearSelection()
         for path in paths:
-            item = self._path_to_item.get(path)
+            item = self._path_to_item.get(self._norm(path))
             if item:
                 item.setSelected(True)
+
+    def highlight_path(self, path: str):
+        """高亮并滚动到指定路径，不触发 first_image_changed 信号"""
+        item = self._path_to_item.get(self._norm(path))
+        if not item:
+            return
+        self.image_list.blockSignals(True)
+        self.image_list.clearSelection()
+        item.setSelected(True)
+        self.image_list.scrollToItem(item)
+        self.image_list.blockSignals(False)
+        self._update_count_label()
 
 
 class ImageScanWorker(QThread):
@@ -595,6 +611,8 @@ class BatchAnnotationPage(QWidget):
 
         # 左侧: 标注窗口
         self._annotation_window = AnnotationWindow(parent=self)
+        self._syncing_selection = False
+        self._wrap_annotation_load_file()
         content_splitter.addWidget(self._annotation_window)
 
         # 右侧: 图片列表面板
@@ -756,6 +774,12 @@ class BatchAnnotationPage(QWidget):
 
         self._annotation_window.load_file(image_path)
 
+        # 同步 cur_img_idx，否则按 d/a 切换时会从旧位置跳
+        abs_path = os.path.abspath(image_path)
+        m_img_list = getattr(self._annotation_window, "m_img_list", [])
+        if abs_path in m_img_list:
+            self._annotation_window.cur_img_idx = m_img_list.index(abs_path)
+
         # 记录加载时已有的标注作为基线，后续只应用新增的标注
         self._baseline_shapes = self._annotation_window._snapshot_current_shapes()
 
@@ -768,8 +792,43 @@ class BatchAnnotationPage(QWidget):
             self.image_panel.ref_info_label.setText(info)
 
     def _on_first_image_changed(self, path: str):
-        """当列表中第一张选中图片变化时，加载到标注窗口"""
+        """当右侧列表中第一张选中图片变化时，加载到标注窗口"""
+        if self._syncing_selection:
+            return
+        self._syncing_selection = True
         self._load_first_image(path, self._current_directory)
+        self._syncing_selection = False
+
+    def _wrap_annotation_load_file(self):
+        """包装 AnnotationWindow.load_file，在完成后同步右侧列表"""
+        original = self._annotation_window.load_file
+
+        def wrapped(file_path=None):
+            result = original(file_path)
+            self._after_annotation_load()
+            return result
+
+        self._annotation_window.load_file = wrapped
+
+    def _after_annotation_load(self):
+        """AnnotationWindow 加载完一张图片后，同步右侧面板"""
+        if self._syncing_selection:
+            return
+        file_path = getattr(self._annotation_window, "file_path", None)
+        if not file_path:
+            return
+        file_path = os.path.abspath(file_path)
+        self._syncing_selection = True
+        self.image_panel.highlight_path(file_path)
+        self._baseline_shapes = self._annotation_window._snapshot_current_shapes()
+        img = QImage(file_path)
+        if not img.isNull():
+            baseline_count = len(self._baseline_shapes)
+            info = f"参考分辨率: {img.width()} x {img.height()}"
+            if baseline_count:
+                info += f" | 已有 {baseline_count} 个标注"
+            self.image_panel.ref_info_label.setText(info)
+        self._syncing_selection = False
 
     # ------------------------------------------------------------------
     # Batch apply
