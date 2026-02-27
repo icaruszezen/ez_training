@@ -12,6 +12,8 @@ from ez_traing.prelabeling.models import BoundingBox
 
 logger = logging.getLogger(__name__)
 
+_SQDIFF_METHODS = frozenset({cv2.TM_SQDIFF, cv2.TM_SQDIFF_NORMED})
+
 
 def imread_unicode(path: str, flags: int = cv2.IMREAD_COLOR) -> Optional[np.ndarray]:
     """读取可能含非 ASCII（如中文）路径的图片，兼容 Windows。"""
@@ -19,6 +21,7 @@ def imread_unicode(path: str, flags: int = cv2.IMREAD_COLOR) -> Optional[np.ndar
         data = np.fromfile(path, dtype=np.uint8)
         return cv2.imdecode(data, flags)
     except Exception:
+        logger.warning("无法读取图片文件: %s", path, exc_info=True)
         return None
 
 
@@ -97,7 +100,9 @@ class TemplateMatcher:
     Parameters
     ----------
     threshold : float
-        匹配分数下限，低于此值的候选框被过滤。
+        匹配分数阈值。对于 TM_CCOEFF_NORMED 等方法，>= threshold 的候选框
+        被保留；对于 TM_SQDIFF/TM_SQDIFF_NORMED，<= threshold 的候选框
+        被保留（值越小匹配越好），置信度会被归一化为越大越好。
     max_candidates : int
         每张图片最多保留的候选框数（NMS 之后）。
     nms_iou_threshold : float
@@ -129,6 +134,10 @@ class TemplateMatcher:
         self.multi_scale = multi_scale
         self.scale_range = scale_range
         self.scale_steps = scale_steps
+
+    @property
+    def _is_sqdiff(self) -> bool:
+        return self.method in _SQDIFF_METHODS
 
     # ------------------------------------------------------------------
     # Template loading
@@ -236,6 +245,12 @@ class TemplateMatcher:
         y = max(0, min(y, ih - 1))
         w = min(w, iw - x)
         h = min(h, ih - y)
+        if w <= 0 or h <= 0:
+            logger.warning(
+                "ROI 裁剪后区域为空 (roi=%s, image=%dx%d), 回退到全图",
+                roi, iw, ih,
+            )
+            return image.copy(), 0, 0
         return image[y : y + h, x : x + w].copy(), x, y
 
     # ------------------------------------------------------------------
@@ -289,6 +304,7 @@ class TemplateMatcher:
                     tpl.label,
                     target_path,
                     exc,
+                    exc_info=True,
                 )
 
         all_boxes = self._nms(all_boxes)
@@ -313,6 +329,10 @@ class TemplateMatcher:
     ) -> List[BoundingBox]:
         th, tw = tpl_image.shape[:2]
         if target.shape[0] < th or target.shape[1] < tw:
+            logger.debug(
+                "目标图 (%dx%d) 小于模板 '%s' (%dx%d), 跳过",
+                target.shape[1], target.shape[0], tpl.label, tw, th,
+            )
             return []
 
         result = cv2.matchTemplate(target, tpl_image, self.method)
@@ -357,10 +377,20 @@ class TemplateMatcher:
         offset_x: int = 0,
         offset_y: int = 0,
     ) -> List[BoundingBox]:
-        locations = np.where(result >= self.threshold)
+        if self._is_sqdiff:
+            locations = np.where(result <= self.threshold)
+        else:
+            locations = np.where(result >= self.threshold)
         boxes: List[BoundingBox] = []
         for y, x in zip(*locations):
-            score = float(result[y, x])
+            raw = float(result[y, x])
+            if self._is_sqdiff:
+                if self.method == cv2.TM_SQDIFF_NORMED:
+                    confidence = 1.0 - raw
+                else:
+                    confidence = 1.0 / (1.0 + raw)
+            else:
+                confidence = raw
             boxes.append(
                 BoundingBox(
                     label=label,
@@ -368,30 +398,39 @@ class TemplateMatcher:
                     y_min=int(y) + offset_y,
                     x_max=int(x + tw) + offset_x,
                     y_max=int(y + th) + offset_y,
-                    confidence=score,
+                    confidence=confidence,
                 )
             )
         return boxes
 
     def _nms(self, boxes: List[BoundingBox]) -> List[BoundingBox]:
-        """非极大值抑制。"""
+        """非极大值抑制（按标签分组，避免跨类别抑制）。"""
         if not boxes:
             return boxes
 
-        coords = np.array(
-            [[b.x_min, b.y_min, b.x_max, b.y_max] for b in boxes], dtype=np.float32
-        )
-        scores = np.array([b.confidence for b in boxes], dtype=np.float32)
+        label_groups: Dict[str, List[int]] = {}
+        for i, b in enumerate(boxes):
+            label_groups.setdefault(b.label, []).append(i)
 
-        indices = cv2.dnn.NMSBoxes(
-            bboxes=coords.tolist(),
-            scores=scores.tolist(),
-            score_threshold=self.threshold,
-            nms_threshold=self.nms_iou_threshold,
-        )
+        kept: List[BoundingBox] = []
+        for group_indices in label_groups.values():
+            group = [boxes[i] for i in group_indices]
+            rects = [
+                [float(b.x_min), float(b.y_min),
+                 float(b.x_max - b.x_min), float(b.y_max - b.y_min)]
+                for b in group
+            ]
+            scores = [float(b.confidence) for b in group]
 
-        if len(indices) == 0:
-            return []
+            nms_indices = cv2.dnn.NMSBoxes(
+                bboxes=rects,
+                scores=scores,
+                score_threshold=0.0,
+                nms_threshold=self.nms_iou_threshold,
+            )
 
-        kept_indices = indices.flatten().tolist()
-        return [boxes[i] for i in kept_indices]
+            if len(nms_indices) > 0:
+                for idx in nms_indices.flatten().tolist():
+                    kept.append(group[idx])
+
+        return kept
