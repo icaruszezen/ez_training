@@ -89,25 +89,26 @@ class DataPrepPipeline:
         class_to_id = {name: i for i, name in enumerate(class_names)}
 
         train_samples, val_samples = split_train_val(
-            samples, self.config.train_ratio, self.config.random_seed
+            samples, self.config.train_ratio, self.config.random_seed, dataset_root
         )
         self._log(
             log_callback,
             f"划分完成: train={len(train_samples)}, val={len(val_samples)}",
         )
 
-        augmenter = None
         augment_workers = 1
         aug_enabled = bool(self.config.augment_methods) and self.config.augment_times > 0
         if aug_enabled:
-            augmenter = build_augmenter(self.config.augment_methods)
-            if augmenter is not None:
+            if build_augmenter(self.config.augment_methods) is None:
+                aug_enabled = False
+                self._log(log_callback, "指定的增强方法均无效，已跳过增强")
+            else:
                 augment_workers = self._resolve_augment_workers()
-            self._log(
-                log_callback,
-                f"启用增强: {', '.join(self.config.augment_methods)} x{self.config.augment_times}",
-            )
-            self._log(log_callback, f"增强线程数: {augment_workers}")
+                self._log(
+                    log_callback,
+                    f"启用增强: {', '.join(self.config.augment_methods)} x{self.config.augment_times}",
+                )
+                self._log(log_callback, f"增强线程数: {augment_workers}")
 
         total_steps = self._estimate_total_steps(len(train_samples), len(val_samples), aug_enabled)
         done_steps = 0
@@ -132,7 +133,7 @@ class DataPrepPipeline:
             used_names=used_train_names,
             dataset_root=dataset_root,
             class_to_id=class_to_id,
-            augmenter=augmenter,
+            do_augment=aug_enabled,
             progress_total=total_steps,
             progress_done=done_steps,
             progress_callback=progress_callback,
@@ -151,7 +152,7 @@ class DataPrepPipeline:
             used_names=used_val_names,
             dataset_root=dataset_root,
             class_to_id=class_to_id,
-            augmenter=augmenter if self.config.augment_scope == "both" else None,
+            do_augment=aug_enabled and self.config.augment_scope == "both",
             progress_total=total_steps,
             progress_done=done_steps,
             progress_callback=progress_callback,
@@ -297,7 +298,7 @@ class DataPrepPipeline:
         used_names: Set[str],
         dataset_root: Path,
         class_to_id: Dict[str, int],
-        augmenter,
+        do_augment: bool,
         progress_total: int,
         progress_done: int,
         progress_callback: Optional[Callable[[int, str], None]],
@@ -309,7 +310,9 @@ class DataPrepPipeline:
         aug_count = 0
         executor: Optional[ThreadPoolExecutor] = None
         thread_state = None
-        if augmenter is not None and augment_workers > 1:
+        augmenter_cache: Dict[Tuple[int, int], object] = {}
+
+        if do_augment and augment_workers > 1:
             executor = ThreadPoolExecutor(max_workers=augment_workers)
             thread_state = local()
 
@@ -331,19 +334,17 @@ class DataPrepPipeline:
                 out_img = image_dir / f"{base_stem}{base_ext}"
                 out_lbl = label_dir / f"{base_stem}.txt"
 
+                shutil.copy2(sample.image_path, out_img)
+
                 image_array = None
-                if augmenter is None:
-                    shutil.copy2(sample.image_path, out_img)
-                    if width is None or height is None:
-                        with Image.open(sample.image_path) as pil_img:
-                            width, height = pil_img.size
-                else:
+                if do_augment:
                     with Image.open(sample.image_path) as pil_img:
-                        rgb_image = pil_img.convert("RGB")
                         if width is None or height is None:
-                            width, height = rgb_image.size
-                        rgb_image.save(out_img)
-                        image_array = np.array(rgb_image)
+                            width, height = pil_img.size
+                        image_array = np.array(pil_img.convert("RGB"))
+                elif width is None or height is None:
+                    with Image.open(sample.image_path) as pil_img:
+                        width, height = pil_img.size
 
                 if width is None or height is None:
                     raise ValueError(f"无法获取图片尺寸: {sample.image_path}")
@@ -357,18 +358,29 @@ class DataPrepPipeline:
                     f"{split_name}: {output_count} 张",
                 )
 
-                if augmenter is None:
+                if not do_augment:
                     continue
+
+                img_size = (height, width)
 
                 if executor is not None and thread_state is not None:
                     augmented_items = self._augment_image_parallel(
                         image_array=image_array,
                         boxes=sample.boxes,
+                        image_size=img_size,
                         executor=executor,
                         thread_state=thread_state,
                         is_cancelled=is_cancelled,
                     )
                 else:
+                    augmenter = augmenter_cache.get(img_size)
+                    if augmenter is None:
+                        augmenter = build_augmenter(
+                            self.config.augment_methods, image_size=img_size
+                        )
+                        if augmenter is None:
+                            raise RuntimeError("增强器构建失败，请检查增强方法配置")
+                        augmenter_cache[img_size] = augmenter
                     augmented_items = []
                     for _ in range(self.config.augment_times):
                         if is_cancelled and is_cancelled():
@@ -408,17 +420,24 @@ class DataPrepPipeline:
         self,
         image_array: np.ndarray,
         boxes: List,
+        image_size: Tuple[int, int],
         executor: ThreadPoolExecutor,
         thread_state,
         is_cancelled: Optional[Callable[[], bool]],
     ) -> List[Tuple[np.ndarray, List]]:
         def _worker() -> Tuple[np.ndarray, List]:
-            local_augmenter = getattr(thread_state, "augmenter", None)
+            cache = getattr(thread_state, "augmenter_cache", None)
+            if cache is None:
+                cache = {}
+                thread_state.augmenter_cache = cache
+            local_augmenter = cache.get(image_size)
             if local_augmenter is None:
-                local_augmenter = build_augmenter(self.config.augment_methods)
+                local_augmenter = build_augmenter(
+                    self.config.augment_methods, image_size=image_size
+                )
                 if local_augmenter is None:
                     raise RuntimeError("增强器构建失败，请检查增强方法配置")
-                thread_state.augmenter = local_augmenter
+                cache[image_size] = local_augmenter
             return apply_augmentation(image_array, boxes, local_augmenter)
 
         futures = [executor.submit(_worker) for _ in range(self.config.augment_times)]

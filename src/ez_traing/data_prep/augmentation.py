@@ -1,7 +1,7 @@
 """Albumentations 数据增强封装。"""
 
 import inspect
-from typing import Callable, Dict, List, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -38,7 +38,9 @@ def get_augmentation_specs() -> List[Tuple[str, str]]:
     return list(AUGMENTATION_SPECS)
 
 
-def _build_transform_map() -> Dict[str, Callable[[], "A.BasicTransform"]]:
+def _build_transform_map(
+    image_size: Optional[Tuple[int, int]] = None,
+) -> Dict[str, Callable[[], "A.BasicTransform"]]:
     if A is None:
         return {}
 
@@ -51,7 +53,7 @@ def _build_transform_map() -> Dict[str, Callable[[], "A.BasicTransform"]]:
         ),
         "affine": lambda: A.Affine(scale=(0.9, 1.1), translate_percent=(-0.08, 0.08), p=0.4),
         "perspective": lambda: A.Perspective(scale=(0.03, 0.08), p=0.3),
-        "random_resized_crop": _build_random_resized_crop,
+        "random_resized_crop": lambda: _build_random_resized_crop(image_size),
         "brightness_contrast": lambda: A.RandomBrightnessContrast(p=0.5),
         "hsv": lambda: A.HueSaturationValue(p=0.4),
         "rgb_shift": lambda: A.RGBShift(p=0.3),
@@ -61,31 +63,53 @@ def _build_transform_map() -> Dict[str, Callable[[], "A.BasicTransform"]]:
         "motion_blur": lambda: A.MotionBlur(blur_limit=(3, 7), p=0.2),
         "gauss_noise": lambda: A.GaussNoise(p=0.25),
         "median_blur": lambda: A.MedianBlur(blur_limit=5, p=0.2),
-        "coarse_dropout": lambda: A.CoarseDropout(
-            max_holes=8, max_height=32, max_width=32, p=0.25
-        ),
+        "coarse_dropout": _build_coarse_dropout,
     }
 
 
-def _build_random_resized_crop():
-    """兼容 Albumentations 1.x/2.x 的 RandomResizedCrop 参数差异。"""
+def _build_random_resized_crop(image_size: Optional[Tuple[int, int]] = None):
+    """兼容 Albumentations 1.x/2.x，输出尺寸匹配原始图片。"""
     if A is None:
         raise RuntimeError("未安装 albumentations，请先安装依赖")
 
+    h, w = image_size if image_size else (640, 640)
     params = inspect.signature(A.RandomResizedCrop).parameters
     if "size" in params:
-        return A.RandomResizedCrop(size=(640, 640), scale=(0.7, 1.0), ratio=(0.8, 1.25), p=0.3)
-    return A.RandomResizedCrop(height=640, width=640, scale=(0.7, 1.0), ratio=(0.8, 1.25), p=0.3)
+        return A.RandomResizedCrop(size=(h, w), scale=(0.7, 1.0), ratio=(0.8, 1.25), p=0.3)
+    return A.RandomResizedCrop(height=h, width=w, scale=(0.7, 1.0), ratio=(0.8, 1.25), p=0.3)
 
 
-def build_augmenter(methods: List[str]):
-    """根据方法列表构建增强器。"""
+def _build_coarse_dropout():
+    """兼容 Albumentations 1.x/2.x 的 CoarseDropout 参数差异。"""
+    if A is None:
+        raise RuntimeError("未安装 albumentations，请先安装依赖")
+
+    params = inspect.signature(A.CoarseDropout).parameters
+    if "num_holes_range" in params:
+        return A.CoarseDropout(
+            num_holes_range=(4, 8),
+            hole_height_range=(0.02, 0.06),
+            hole_width_range=(0.02, 0.06),
+            p=0.25,
+        )
+    return A.CoarseDropout(max_holes=8, max_height=32, max_width=32, p=0.25)
+
+
+def build_augmenter(
+    methods: List[str], image_size: Optional[Tuple[int, int]] = None
+):
+    """根据方法列表构建增强器。
+
+    Args:
+        methods: 增强方法名称列表。
+        image_size: ``(height, width)``，用于 RandomResizedCrop 等尺寸相关变换。
+    """
     if not methods:
         return None
     if A is None:
         raise RuntimeError("未安装 albumentations，请先安装依赖")
 
-    transform_map = _build_transform_map()
+    transform_map = _build_transform_map(image_size=image_size)
     transforms = [transform_map[m]() for m in methods if m in transform_map]
     if not transforms:
         return None

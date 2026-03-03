@@ -4,7 +4,7 @@ import random
 import re
 from collections import defaultdict
 from pathlib import Path
-from typing import DefaultDict, List, Tuple
+from typing import DefaultDict, List, Optional, Tuple
 
 from ez_traing.data_prep.models import DatasetSample
 
@@ -25,16 +25,29 @@ def _normalize_base_stem(stem: str) -> str:
     return value or stem.lower()
 
 
-def _leakage_group_key(sample: DatasetSample) -> str:
-    """生成防泄露分组 key：同目录同源主干视为一组。"""
+def _leakage_group_key(sample: DatasetSample, dataset_root: Optional[Path] = None) -> str:
+    """生成防泄露分组 key：同目录同源主干视为一组。
+
+    使用相对于 *dataset_root* 的完整父路径作为目录标识，
+    避免不同子树下同名目录的样本被错误归组。
+    """
     path: Path = sample.image_path
-    parent = path.parent.name.lower()
+    if dataset_root is not None:
+        try:
+            parent = path.relative_to(dataset_root).parent.as_posix().lower()
+        except ValueError:
+            parent = path.parent.name.lower()
+    else:
+        parent = path.parent.name.lower()
     base = _normalize_base_stem(path.stem)
     return f"{parent}::{base}"
 
 
 def split_train_val(
-    samples: List[DatasetSample], train_ratio: float, seed: int
+    samples: List[DatasetSample],
+    train_ratio: float,
+    seed: int,
+    dataset_root: Optional[Path] = None,
 ) -> Tuple[List[DatasetSample], List[DatasetSample]]:
     """按同源分组划分 train/val，避免数据泄露。"""
     if not samples:
@@ -42,7 +55,7 @@ def split_train_val(
 
     groups: DefaultDict[str, List[DatasetSample]] = defaultdict(list)
     for sample in samples:
-        groups[_leakage_group_key(sample)].append(sample)
+        groups[_leakage_group_key(sample, dataset_root)].append(sample)
 
     grouped_items = list(groups.items())
     if len(grouped_items) < 2:
