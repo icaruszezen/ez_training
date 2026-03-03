@@ -309,6 +309,30 @@ class DataPrepPage(QWidget):
         self.overwrite_cb = CheckBox("覆盖输出目录中的旧结果（images/labels/data.yaml/classes.txt）", card)
         self.overwrite_cb.setChecked(True)
         layout.addWidget(self.overwrite_cb)
+
+        self.custom_classes_cb = CheckBox("使用自定义类别文件（classes.txt）", card)
+        self.custom_classes_cb.setChecked(False)
+        self.custom_classes_cb.toggled.connect(self._on_custom_classes_toggled)
+        layout.addWidget(self.custom_classes_cb)
+
+        classes_row = QHBoxLayout()
+        self.custom_classes_edit = LineEdit(card)
+        self.custom_classes_edit.setPlaceholderText("选择 classes.txt 文件路径")
+        self.custom_classes_edit.setEnabled(False)
+        classes_row.addWidget(self.custom_classes_edit, 1)
+        self.browse_classes_btn = PushButton("浏览", card)
+        self.browse_classes_btn.setIcon(FIF.DOCUMENT)
+        self.browse_classes_btn.setEnabled(False)
+        self.browse_classes_btn.clicked.connect(self._browse_custom_classes)
+        classes_row.addWidget(self.browse_classes_btn)
+        layout.addLayout(classes_row)
+
+        self.custom_classes_hint = CaptionLabel(
+            "文件每行一个类别名称，类别顺序将决定 YOLO 标注中的 class_id", card
+        )
+        self.custom_classes_hint.setEnabled(False)
+        layout.addWidget(self.custom_classes_hint)
+
         return card
 
     def _create_action_card(self) -> CardWidget:
@@ -465,6 +489,8 @@ class DataPrepPage(QWidget):
         self.overwrite_cb.toggled.connect(self._save_ui_state)
         for cb in self._method_checkboxes.values():
             cb.toggled.connect(self._save_ui_state)
+        self.custom_classes_cb.toggled.connect(self._save_ui_state)
+        self.custom_classes_edit.textChanged.connect(self._save_ui_state)
 
     def _ui_state_dir(self) -> Path:
         state_dir = self._ui_state_path.parent
@@ -564,12 +590,20 @@ class DataPrepPage(QWidget):
             self.overwrite_cb.setChecked(
                 self._safe_bool(state.get("overwrite_output"), default=True)
             )
+
+            self.custom_classes_cb.setChecked(
+                self._safe_bool(state.get("use_custom_classes"), default=False)
+            )
+            custom_classes_file = state.get("custom_classes_file")
+            if isinstance(custom_classes_file, str) and custom_classes_file.strip():
+                self.custom_classes_edit.setText(custom_classes_file.strip())
         finally:
             self._restoring_ui_state = False
 
         self._update_ratio_hint()
         self._update_aug_hint()
         self._on_aug_toggled(self.enable_aug_cb.isChecked())
+        self._on_custom_classes_toggled(self.custom_classes_cb.isChecked())
 
     def _save_ui_state(self) -> None:
         if self._restoring_ui_state:
@@ -585,6 +619,8 @@ class DataPrepPage(QWidget):
             "output_dir": self.output_dir_edit.text().strip(),
             "skip_unlabeled": self.skip_unlabeled_cb.isChecked(),
             "overwrite_output": self.overwrite_cb.isChecked(),
+            "use_custom_classes": self.custom_classes_cb.isChecked(),
+            "custom_classes_file": self.custom_classes_edit.text().strip(),
         }
         try:
             self._ui_state_dir()
@@ -598,6 +634,20 @@ class DataPrepPage(QWidget):
         path = QFileDialog.getExistingDirectory(self, "选择输出目录", current)
         if path:
             self.output_dir_edit.setText(path)
+
+    def _on_custom_classes_toggled(self, enabled: bool):
+        self.custom_classes_edit.setEnabled(enabled)
+        self.browse_classes_btn.setEnabled(enabled)
+        self.custom_classes_hint.setEnabled(enabled)
+
+    def _browse_custom_classes(self):
+        current = self.custom_classes_edit.text().strip()
+        start_dir = str(Path(current).parent) if current else ""
+        path, _ = QFileDialog.getOpenFileName(
+            self, "选择类别文件", start_dir, "文本文件 (*.txt);;所有文件 (*)"
+        )
+        if path:
+            self.custom_classes_edit.setText(path)
 
     def _open_output_dir(self):
         path = self.output_dir_edit.text().strip()
@@ -662,6 +712,18 @@ class DataPrepPage(QWidget):
             augment_times = self.aug_count_spin.value()
             augment_scope = self._get_aug_scope()
 
+        custom_classes_file = None
+        if self.custom_classes_cb.isChecked():
+            custom_classes_file = self.custom_classes_edit.text().strip() or None
+            if not custom_classes_file:
+                InfoBar.warning(
+                    title="提示",
+                    content="已启用自定义类别文件，请选择 classes.txt 文件",
+                    parent=self.window(),
+                    position=InfoBarPosition.TOP,
+                )
+                return
+
         config = DataPrepConfig(
             dataset_name=project.name,
             dataset_dir=project.directory,
@@ -673,6 +735,7 @@ class DataPrepPage(QWidget):
             augment_scope=augment_scope,
             skip_unlabeled=self.skip_unlabeled_cb.isChecked(),
             overwrite_output=self.overwrite_cb.isChecked(),
+            custom_classes_file=custom_classes_file,
         )
 
         self._worker = DataPrepWorker(config)
@@ -756,6 +819,10 @@ class DataPrepPage(QWidget):
         self.browse_output_btn.setEnabled(not running)
         self.skip_unlabeled_cb.setEnabled(not running)
         self.overwrite_cb.setEnabled(not running)
+        self.custom_classes_cb.setEnabled(not running)
+        custom_enabled = not running and self.custom_classes_cb.isChecked()
+        self.custom_classes_edit.setEnabled(custom_enabled)
+        self.browse_classes_btn.setEnabled(custom_enabled)
 
     def _log(self, text: str):
         timestamp = datetime.now().strftime("%H:%M:%S")

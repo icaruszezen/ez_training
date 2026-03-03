@@ -60,10 +60,30 @@ class DataPrepPipeline:
         if not samples:
             raise ValueError("没有可处理样本，请确认目录下存在图片和 VOC XML 标注")
 
-        existing_classes = load_existing_classes(dataset_root)
-        class_names = build_class_names(samples, existing_classes)
-        if not class_names:
-            raise ValueError("未能从数据中提取到类别，请确认 VOC 标注有效")
+        if self.config.custom_classes_file:
+            custom_path = Path(self.config.custom_classes_file)
+            self._log(log_callback, f"使用自定义类别文件: {custom_path}")
+            with open(custom_path, "r", encoding="utf-8") as f:
+                class_names = [line.strip() for line in f if line.strip()]
+            if not class_names:
+                raise ValueError(f"自定义类别文件为空: {custom_path}")
+            self._log(log_callback, f"自定义类别 ({len(class_names)}): {class_names}")
+            class_set = set(class_names)
+            unknown_labels = set()
+            for sample in samples:
+                for box in sample.boxes:
+                    if box.label not in class_set:
+                        unknown_labels.add(box.label)
+            if unknown_labels:
+                self._log(
+                    log_callback,
+                    f"[警告] 以下标签不在自定义类别中，对应标注框将被跳过: {sorted(unknown_labels)}",
+                )
+        else:
+            existing_classes = load_existing_classes(dataset_root)
+            class_names = build_class_names(samples, existing_classes)
+            if not class_names:
+                raise ValueError("未能从数据中提取到类别，请确认 VOC 标注有效")
         class_to_id = {name: i for i, name in enumerate(class_names)}
 
         train_samples, val_samples = split_train_val(

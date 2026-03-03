@@ -43,6 +43,7 @@ class DataPrepConfig:
     augment_scope: str = "train"  # train | both
     skip_unlabeled: bool = True
     overwrite_output: bool = True
+    custom_classes_file: Optional[str] = None
 
     def validate(self) -> None:
         if not self.dataset_name.strip():
@@ -59,6 +60,14 @@ class DataPrepConfig:
             raise ValueError("增强次数不能为负数")
         if self.augment_workers < 0:
             raise ValueError("增强线程数不能为负数")
+        if self.custom_classes_file is not None:
+            p = Path(self.custom_classes_file)
+            if not p.exists():
+                raise ValueError(f"自定义类别文件不存在: {p}")
+            with open(p, "r", encoding="utf-8") as f:
+                lines = [line.strip() for line in f if line.strip()]
+            if not lines:
+                raise ValueError(f"自定义类别文件为空: {p}")
 
 
 @dataclass
