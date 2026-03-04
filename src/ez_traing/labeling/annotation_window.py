@@ -616,6 +616,7 @@ class PredefinedLabelsDialog(QDialog):
 
 class AnnotationWindow(labelimg_module.MainWindow):
     file_loaded = pyqtSignal()
+    file_saved = pyqtSignal(str)  # emits the image file path after saving
 
     def __init__(
         self,
@@ -647,6 +648,11 @@ class AnnotationWindow(labelimg_module.MainWindow):
         result = super().load_file(file_path)
         self.file_loaded.emit()
         return result
+
+    def _save_file(self, annotation_file_path):
+        super()._save_file(annotation_file_path)
+        if not self.dirty and self.file_path:
+            self.file_saved.emit(os.path.abspath(self.file_path))
 
     def _setup_dock_title_bars(self):
         """自定义右侧 Dock 标题栏，避免文字裁切"""

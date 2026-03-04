@@ -20,6 +20,7 @@ _SETTINGS_FILE = "settings.json"
 _DEFAULT_SETTINGS: Dict[str, Any] = {
     "github_mirror_enabled": False,
     "github_mirror_url": "https://ghp.ci/",
+    "sample_dataset_dir": "",
 }
 
 

@@ -3,14 +3,16 @@
 功能：多选图片，对第一张标注后将标注应用到所有分辨率一致的图片
 """
 
+import logging
 import os
+import shutil
 import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 from PyQt5.QtCore import Qt, QSize, QThread, pyqtSignal
-from PyQt5.QtGui import QPixmap, QIcon, QImage, QColor, QBrush
+from PyQt5.QtGui import QPixmap, QIcon, QImage, QColor, QBrush, QKeySequence
 from PyQt5.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -23,6 +25,7 @@ from PyQt5.QtWidgets import (
     QStyledItemDelegate,
     QMenu,
     QAction,
+    QShortcut,
 )
 from qfluentwidgets import (
     PushButton,
@@ -40,7 +43,7 @@ from qfluentwidgets import (
     ComboBox,
 )
 
-from ez_traing.common.constants import SUPPORTED_IMAGE_FORMATS
+from ez_traing.common.constants import SUPPORTED_IMAGE_FORMATS, load_settings
 from ez_traing.labeling.annotation_window import AnnotationWindow
 from ez_traing.ui.workers import ImageScanWorker, ThumbnailLoader
 
@@ -51,8 +54,11 @@ if str(_LABELIMG_ROOT) not in sys.path:
 from libs.labelFile import LabelFile, LabelFileFormat
 
 
+logger = logging.getLogger(__name__)
+
 _COLOR_MISMATCH = QColor(255, 210, 210)
 _COLOR_SUCCESS = QColor(210, 255, 210)
+_COLOR_SAMPLED = QColor(255, 200, 50)
 
 
 def _shape_bbox_key(shape: dict) -> tuple:
@@ -259,6 +265,8 @@ class BatchImageListPanel(CardWidget):
     selection_changed = pyqtSignal()
     first_image_changed = pyqtSignal(str)  # 第一张选中图片路径变化
 
+    sample_mark_requested = pyqtSignal(str, bool)  # path, mark (True=add, False=remove)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setMinimumWidth(280)
@@ -268,6 +276,7 @@ class BatchImageListPanel(CardWidget):
         self._thumbnail_cache: Dict[str, QPixmap] = {}
         self._mismatch_paths: set = set()
         self._success_paths: set = set()
+        self._sampled_paths: Set[str] = set()
         self._thumbnail_loader: Optional[ThumbnailLoader] = None
         self._setup_ui()
 
@@ -349,6 +358,7 @@ class BatchImageListPanel(CardWidget):
         self._all_paths = list(paths)
         self._mismatch_paths.clear()
         self._success_paths.clear()
+        self._sampled_paths.clear()
 
         placeholder = QPixmap(60, 60)
         placeholder.fill(Qt.lightGray)
@@ -408,15 +418,46 @@ class BatchImageListPanel(CardWidget):
         if item:
             item.setBackground(QBrush(_COLOR_SUCCESS))
 
-    def clear_marks(self):
-        """清除所有标记"""
+    def clear_marks(self, keep_sampled: bool = True):
+        """清除所有标记（加样标记可选保留）"""
         self._mismatch_paths.clear()
         self._success_paths.clear()
         for item in self._path_to_item.values():
+            original_path = item.data(Qt.UserRole)
+            norm = self._norm(original_path) if original_path else ""
+            if keep_sampled and norm in self._sampled_paths:
+                item.setBackground(QBrush(_COLOR_SAMPLED))
+                item.setText(f"{Path(original_path).name}  [加样]")
+            else:
+                item.setBackground(QBrush())
+                if original_path:
+                    item.setText(Path(original_path).name)
+        if not keep_sampled:
+            self._sampled_paths.clear()
+
+    def mark_sampled(self, path: str):
+        """标记图片为加样状态"""
+        norm = self._norm(path)
+        self._sampled_paths.add(norm)
+        item = self._path_to_item.get(norm)
+        if item:
+            item.setBackground(QBrush(_COLOR_SAMPLED))
+            original_path = item.data(Qt.UserRole)
+            item.setText(f"{Path(original_path).name}  [加样]")
+
+    def unmark_sampled(self, path: str):
+        """取消图片的加样标记"""
+        norm = self._norm(path)
+        self._sampled_paths.discard(norm)
+        item = self._path_to_item.get(norm)
+        if item:
             item.setBackground(QBrush())
             original_path = item.data(Qt.UserRole)
             if original_path:
                 item.setText(Path(original_path).name)
+
+    def is_sampled(self, path: str) -> bool:
+        return self._norm(path) in self._sampled_paths
 
     def _show_context_menu(self, pos):
         """右键菜单"""
@@ -426,6 +467,24 @@ class BatchImageListPanel(CardWidget):
 
         menu = QMenu(self)
         count = len(selected)
+
+        # 加样操作
+        sampled_count = sum(
+            1 for it in selected if self._norm(it.data(Qt.UserRole)) in self._sampled_paths
+        )
+        not_sampled_count = count - sampled_count
+
+        if not_sampled_count > 0:
+            act_sample = QAction(f"标记为加样 ({not_sampled_count} 张)", menu)
+            act_sample.triggered.connect(self._request_mark_selected_sampled)
+            menu.addAction(act_sample)
+
+        if sampled_count > 0:
+            act_unsample = QAction(f"取消加样 ({sampled_count} 张)", menu)
+            act_unsample.triggered.connect(self._request_unmark_selected_sampled)
+            menu.addAction(act_unsample)
+
+        menu.addSeparator()
 
         act_green = QAction(f"标记为绿色 ({count} 张)", menu)
         act_green.triggered.connect(lambda: self._mark_selected_color(_COLOR_SUCCESS))
@@ -446,6 +505,18 @@ class BatchImageListPanel(CardWidget):
         menu.addAction(act_clear_all)
 
         menu.exec_(self.image_list.viewport().mapToGlobal(pos))
+
+    def _request_mark_selected_sampled(self):
+        for item in self.image_list.selectedItems():
+            path = item.data(Qt.UserRole)
+            if not self.is_sampled(path):
+                self.sample_mark_requested.emit(path, True)
+
+    def _request_unmark_selected_sampled(self):
+        for item in self.image_list.selectedItems():
+            path = item.data(Qt.UserRole)
+            if self.is_sampled(path):
+                self.sample_mark_requested.emit(path, False)
 
     def _mark_selected_color(self, color: QColor):
         """将当前选中的图片标记为指定颜色"""
@@ -539,6 +610,9 @@ class BatchAnnotationPage(QWidget):
         self._scan_worker: Optional[ImageScanWorker] = None
         self._annotation_window: Optional[AnnotationWindow] = None
         self._baseline_shapes: List[dict] = []
+        # 加样状态
+        self._sampled_paths: Set[str] = set()
+        self._sample_dataset_dir: Optional[str] = None
         self._setup_ui()
 
     def _setup_ui(self):
@@ -563,11 +637,13 @@ class BatchAnnotationPage(QWidget):
         self._annotation_window = AnnotationWindow(parent=self)
         self._syncing_selection = False
         self._annotation_window.file_loaded.connect(self._after_annotation_load)
+        self._annotation_window.file_saved.connect(self._on_file_saved)
         content_splitter.addWidget(self._annotation_window)
 
         # 右侧: 图片列表面板
         self.image_panel = BatchImageListPanel()
         self.image_panel.first_image_changed.connect(self._on_first_image_changed)
+        self.image_panel.sample_mark_requested.connect(self._on_sample_mark_from_panel)
         content_splitter.addWidget(self.image_panel)
 
         content_splitter.setSizes([800, 320])
@@ -582,6 +658,11 @@ class BatchAnnotationPage(QWidget):
         status_layout.addWidget(self.status_label)
         status_layout.addStretch()
         main_layout.addLayout(status_layout)
+
+        # 快捷键
+        sc = QShortcut(QKeySequence("G"), self)
+        sc.setContext(Qt.WidgetWithChildrenShortcut)
+        sc.activated.connect(self._toggle_sample_mark)
 
     def _create_header(self) -> CardWidget:
         header = CardWidget()
@@ -605,6 +686,10 @@ class BatchAnnotationPage(QWidget):
         layout.addStretch()
 
         # 操作按钮
+        self.sample_btn = PushButton("标记加样 (G)", self, FIF.FLAG)
+        self.sample_btn.clicked.connect(self._toggle_sample_mark)
+        layout.addWidget(self.sample_btn)
+
         self.apply_btn = PrimaryPushButton("应用标注到选中图片", self, FIF.SEND)
         self.apply_btn.clicked.connect(self._on_apply_clicked)
         layout.addWidget(self.apply_btn)
@@ -625,6 +710,7 @@ class BatchAnnotationPage(QWidget):
     def load_images(self, directory: str, paths: List[str]):
         """从外部加载指定图片（由数据集页批量标注按钮调用）"""
         self._current_directory = directory
+        self._reset_sample_state()
         self.image_panel.set_images(paths)
 
         if paths:
@@ -701,6 +787,7 @@ class BatchAnnotationPage(QWidget):
             return
 
         self._current_directory = proj.directory
+        self._reset_sample_state()
         self.status_label.setText(f"正在扫描: {proj.name}...")
         self._scan_worker = ImageScanWorker(proj.id, proj.directory)
         self._scan_worker.finished.connect(self._on_scan_finished)
@@ -926,3 +1013,202 @@ class BatchAnnotationPage(QWidget):
         self.apply_btn.setEnabled(not running)
         self.dataset_combo.setEnabled(not running)
         self.clear_marks_btn.setEnabled(not running)
+        self.sample_btn.setEnabled(not running)
+
+    # ------------------------------------------------------------------
+    # Sample mark (加样)
+    # ------------------------------------------------------------------
+
+    def _reset_sample_state(self):
+        self._sampled_paths.clear()
+        self._sample_dataset_dir = None
+        self.image_panel.clear_marks(keep_sampled=False)
+
+    def _get_current_dataset_name(self) -> Optional[str]:
+        if not self._project_manager or not self._project_ids:
+            return None
+        idx = self.dataset_combo.currentIndex()
+        if idx < 0 or idx >= len(self._project_ids):
+            return None
+        proj = self._project_manager.get_project(self._project_ids[idx])
+        return proj.name if proj else None
+
+    def _ensure_sample_dataset_dir(self) -> Optional[str]:
+        """确保加样数据集目录已创建，返回路径或 None"""
+        if self._sample_dataset_dir and os.path.isdir(self._sample_dataset_dir):
+            return self._sample_dataset_dir
+
+        settings = load_settings()
+        root = settings.get("sample_dataset_dir", "").strip()
+        if not root:
+            InfoBar.warning(
+                title="未配置加样目录",
+                content="请先在「设置」页面配置加样数据集存放目录",
+                parent=self,
+                position=InfoBarPosition.TOP,
+                duration=4000,
+            )
+            return None
+
+        dataset_name = self._get_current_dataset_name()
+        if not dataset_name:
+            InfoBar.warning(
+                title="提示",
+                content="请先选择数据集",
+                parent=self,
+                position=InfoBarPosition.TOP,
+                duration=3000,
+            )
+            return None
+
+        target_dir = os.path.join(root, f"{dataset_name}_加样")
+        try:
+            os.makedirs(target_dir, exist_ok=True)
+        except OSError as e:
+            InfoBar.error(
+                title="创建目录失败",
+                content=str(e),
+                parent=self,
+                position=InfoBarPosition.TOP,
+                duration=4000,
+            )
+            return None
+
+        self._sample_dataset_dir = target_dir
+
+        if self._project_manager:
+            already_exists = any(
+                p.directory == target_dir
+                for p in self._project_manager.get_all_projects()
+            )
+            if not already_exists:
+                from ez_traing.pages.dataset_page import DatasetProject
+                proj = DatasetProject.create(f"{dataset_name}_加样", target_dir)
+                self._project_manager.add_project(proj)
+
+        InfoBar.success(
+            title="已创建加样数据集",
+            content=f"目录: {target_dir}",
+            parent=self,
+            position=InfoBarPosition.TOP,
+            duration=3000,
+        )
+        return target_dir
+
+    def _annotation_ext(self) -> str:
+        label_format = getattr(
+            self._annotation_window,
+            "label_file_format",
+            LabelFileFormat.PASCAL_VOC,
+        )
+        return ".txt" if label_format == LabelFileFormat.YOLO else ".xml"
+
+    def _copy_to_sample_dir(self, image_path: str) -> bool:
+        """复制图片及标注文件到加样数据集目录，返回图片是否复制成功"""
+        if not self._sample_dataset_dir:
+            return False
+        p = Path(image_path)
+        try:
+            shutil.copy2(str(p), os.path.join(self._sample_dataset_dir, p.name))
+        except OSError as e:
+            logger.warning("Failed to copy image %s: %s", p.name, e)
+            return False
+
+        ann = p.with_suffix(self._annotation_ext())
+        if ann.exists():
+            try:
+                shutil.copy2(str(ann), os.path.join(self._sample_dataset_dir, ann.name))
+            except OSError as e:
+                logger.warning("Failed to copy annotation %s: %s", ann.name, e)
+        return True
+
+    def _remove_from_sample_dir(self, image_path: str):
+        """从加样数据集目录中删除图片及标注文件"""
+        if not self._sample_dataset_dir:
+            return
+        p = Path(image_path)
+        for name in (p.name, p.with_suffix(self._annotation_ext()).name):
+            target = os.path.join(self._sample_dataset_dir, name)
+            if os.path.isfile(target):
+                try:
+                    os.remove(target)
+                except OSError as e:
+                    logger.warning("Failed to remove %s: %s", name, e)
+
+    def _sync_annotation_to_sample_dir(self, image_path: str):
+        """将标注文件同步到加样数据集目录"""
+        if not self._sample_dataset_dir:
+            return
+        p = Path(image_path)
+        ann = p.with_suffix(self._annotation_ext())
+        if ann.exists():
+            try:
+                shutil.copy2(str(ann), os.path.join(self._sample_dataset_dir, ann.name))
+            except OSError as e:
+                logger.warning("Failed to sync annotation %s: %s", ann.name, e)
+
+    def _toggle_sample_mark(self):
+        """切换当前图片的加样标记"""
+        if not self._annotation_window:
+            return
+        file_path = getattr(self._annotation_window, "file_path", None)
+        if not file_path:
+            return
+        file_path = os.path.abspath(file_path)
+        self._set_sample_mark(file_path, not self.image_panel.is_sampled(file_path))
+
+    def _on_sample_mark_from_panel(self, path: str, mark: bool):
+        self._set_sample_mark(path, mark)
+
+    def _set_sample_mark(self, image_path: str, mark: bool):
+        """设置或取消指定图片的加样标记"""
+        norm = os.path.normcase(os.path.abspath(image_path))
+
+        if mark:
+            target_dir = self._ensure_sample_dataset_dir()
+            if not target_dir:
+                return
+
+            if hasattr(self._annotation_window, "save_file"):
+                cur = getattr(self._annotation_window, "file_path", None)
+                if cur and os.path.normcase(os.path.abspath(cur)) == norm:
+                    self._annotation_window.save_file()
+
+            if not self._copy_to_sample_dir(image_path):
+                InfoBar.error(
+                    title="加样失败",
+                    content=f"无法复制 {Path(image_path).name} 到加样目录",
+                    parent=self,
+                    position=InfoBarPosition.TOP,
+                    duration=3000,
+                )
+                return
+
+            self._sampled_paths.add(norm)
+            self.image_panel.mark_sampled(image_path)
+
+            InfoBar.success(
+                title="已标记加样",
+                content=Path(image_path).name,
+                parent=self,
+                position=InfoBarPosition.TOP,
+                duration=2000,
+            )
+        else:
+            self._sampled_paths.discard(norm)
+            self.image_panel.unmark_sampled(image_path)
+            self._remove_from_sample_dir(image_path)
+
+            InfoBar.info(
+                title="已取消加样",
+                content=Path(image_path).name,
+                parent=self,
+                position=InfoBarPosition.TOP,
+                duration=2000,
+            )
+
+    def _on_file_saved(self, image_path: str):
+        """标注保存后，同步加样数据集中的标注文件"""
+        norm = os.path.normcase(os.path.abspath(image_path))
+        if norm in self._sampled_paths:
+            self._sync_annotation_to_sample_dir(image_path)

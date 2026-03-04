@@ -1,5 +1,7 @@
 """设置页面 - 显示环境信息、GPU 状态和应用更新"""
 
+import os
+
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
     QVBoxLayout,
@@ -8,6 +10,7 @@ from PyQt5.QtWidgets import (
     QHBoxLayout,
     QApplication,
     QMessageBox,
+    QFileDialog,
 )
 from qfluentwidgets import (
     CardWidget,
@@ -346,6 +349,13 @@ class SettingsPage(QWidget):
         content_layout.addWidget(mirror_group_label)
 
         self._create_mirror_card(content_layout)
+        content_layout.addSpacing(10)
+
+        # ── 加样设置 ──────────────────────────────────────────────
+        sample_group_label = StrongBodyLabel("加样设置", self)
+        content_layout.addWidget(sample_group_label)
+
+        self._create_sample_dir_card(content_layout)
         content_layout.addSpacing(10)
 
         # 获取版本信息
@@ -744,3 +754,80 @@ class SettingsPage(QWidget):
             duration=5000,
             parent=self.window(),
         )
+
+    # ── 加样数据集目录设置 ────────────────────────────────────────
+
+    def _create_sample_dir_card(self, parent_layout: QVBoxLayout) -> None:
+        settings = load_settings()
+        saved_dir = settings.get("sample_dataset_dir", "")
+
+        card = CardWidget(self)
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(20, 16, 20, 16)
+        card_layout.setSpacing(14)
+
+        top_row = QHBoxLayout()
+        top_row.setSpacing(16)
+
+        icon_widget = IconWidget(FIF.FOLDER, self)
+        icon_widget.setFixedSize(32, 32)
+        top_row.addWidget(icon_widget)
+
+        text_layout = QVBoxLayout()
+        text_layout.setSpacing(2)
+        text_layout.setContentsMargins(0, 0, 0, 0)
+        title_label = BodyLabel("加样数据集存放目录", self)
+        desc_label = CaptionLabel(
+            "批量标注时标记为"加样"的图片和标注将复制到此目录下的子文件夹中",
+            self,
+        )
+        text_layout.addWidget(title_label)
+        text_layout.addWidget(desc_label)
+        top_row.addLayout(text_layout)
+        top_row.addStretch()
+        card_layout.addLayout(top_row)
+
+        dir_row = QHBoxLayout()
+        dir_row.setSpacing(8)
+
+        self._sample_dir_edit = LineEdit(self)
+        self._sample_dir_edit.setPlaceholderText("请选择加样数据集存放的根目录")
+        self._sample_dir_edit.setText(saved_dir)
+        self._sample_dir_edit.editingFinished.connect(self._on_sample_dir_edited)
+        dir_row.addWidget(self._sample_dir_edit, 1)
+
+        browse_btn = PushButton("浏览", self)
+        browse_btn.setFixedWidth(70)
+        browse_btn.clicked.connect(self._on_browse_sample_dir)
+        dir_row.addWidget(browse_btn)
+
+        card_layout.addLayout(dir_row)
+        parent_layout.addWidget(card)
+
+    def _on_browse_sample_dir(self):
+        current = self._sample_dir_edit.text().strip()
+        directory = QFileDialog.getExistingDirectory(
+            self, "选择加样数据集存放目录", current or ""
+        )
+        if directory:
+            self._sample_dir_edit.setText(directory)
+            self._save_sample_dir_setting()
+
+    def _on_sample_dir_edited(self):
+        self._save_sample_dir_setting()
+
+    def _save_sample_dir_setting(self):
+        directory = self._sample_dir_edit.text().strip()
+        if directory and not os.path.isdir(directory):
+            InfoBar.warning(
+                title="目录不存在",
+                content=f"路径 \"{directory}\" 当前不存在，使用时将尝试自动创建",
+                orient=Qt.Horizontal,
+                isClosable=True,
+                position=InfoBarPosition.TOP,
+                duration=4000,
+                parent=self.window(),
+            )
+        settings = load_settings()
+        settings["sample_dataset_dir"] = directory
+        save_settings(settings)
