@@ -11,11 +11,11 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional, Dict
+from typing import Dict, List, Optional, Tuple
 from collections import Counter
 
 from PyQt5.QtCore import Qt, QSize, QThread, pyqtSignal, QTimer
-from PyQt5.QtGui import QPixmap, QIcon, QImage, QColor, QPainter, QBrush, QPen
+from PyQt5.QtGui import QPixmap, QIcon, QImage, QColor, QPainter, QBrush, QPen, QPalette
 from PyQt5.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -32,6 +32,10 @@ from PyQt5.QtWidgets import (
     QScrollArea,
     QGridLayout,
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
+    QLineEdit,
+    QApplication,
 )
 from qfluentwidgets import (
     PushButton,
@@ -62,6 +66,29 @@ def _get_projects_file() -> Path:
 
 
 _SUBFOLDER_SEP = "::sub::"
+_ARCHIVE_SEP = "::arc::"
+_ARCHIVE_PREFIX = "archive::"
+
+
+@dataclass
+class DatasetArchive:
+    """数据集归档 —— 将多个数据集逻辑合并为一组"""
+    id: str
+    name: str
+    project_ids: List[str]
+    created_at: str = ""
+    updated_at: str = ""
+
+    @classmethod
+    def create(cls, name: str, project_ids: List[str]) -> "DatasetArchive":
+        now = datetime.now().isoformat()
+        return cls(
+            id=str(uuid.uuid4()),
+            name=name,
+            project_ids=list(project_ids),
+            created_at=now,
+            updated_at=now,
+        )
 
 
 @dataclass
@@ -76,6 +103,8 @@ class DatasetProject:
     updated_at: str = ""
     subfolder: Optional[str] = None
     parent_id: Optional[str] = None
+    archive_id: Optional[str] = None
+    is_archive_root: bool = False
 
     @property
     def is_virtual(self) -> bool:
@@ -99,6 +128,7 @@ class ProjectManager:
 
     def __init__(self):
         self.projects: Dict[str, DatasetProject] = {}
+        self.archives: Dict[str, DatasetArchive] = {}
         self._subfolder_modes: Dict[str, bool] = {}
         self._subfolder_cache: Dict[str, List[str]] = {}
         self._subfolder_counts: Dict[str, Dict[str, int]] = {}
@@ -117,26 +147,38 @@ class ProjectManager:
                     data = json.load(f)
                     known_fields = {f.name for f in DatasetProject.__dataclass_fields__.values()}
                     for item in data.get("projects", []):
+                        if item.get("id", "").startswith(_ARCHIVE_PREFIX):
+                            continue
                         filtered = {k: v for k, v in item.items() if k in known_fields}
                         proj = DatasetProject(**filtered)
                         self.projects[proj.id] = proj
                     self._subfolder_modes = data.get("subfolder_modes", {})
+                    archive_fields = {f.name for f in DatasetArchive.__dataclass_fields__.values()}
+                    for item in data.get("archives", []):
+                        filtered = {k: v for k, v in item.items() if k in archive_fields}
+                        arc = DatasetArchive(**filtered)
+                        self.archives[arc.id] = arc
             except Exception:
                 logger.exception("Failed to load project config from %s", config_file)
 
     def _save(self):
         """保存项目配置（排除虚拟条目）"""
         config_file = _get_projects_file()
-        real_projects = [p for p in self.projects.values() if not p.is_virtual]
+        real_projects = [p for p in self.projects.values()
+                         if not p.is_virtual and not p.id.startswith(_ARCHIVE_PREFIX)]
         serialised = []
         for p in real_projects:
             d = asdict(p)
             d.pop("subfolder", None)
             d.pop("parent_id", None)
+            d.pop("archive_id", None)
+            d.pop("is_archive_root", None)
             serialised.append(d)
+        archive_list = [asdict(a) for a in self.archives.values()]
         data = {
             "projects": serialised,
             "subfolder_modes": self._subfolder_modes,
+            "archives": archive_list,
         }
         with open(config_file, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
@@ -151,27 +193,99 @@ class ProjectManager:
         self._save()
 
     def remove_project(self, project_id: str):
-        """删除项目"""
+        """删除项目，同时从所有归档中移除该成员"""
         if project_id in self.projects:
             del self.projects[project_id]
             self._subfolder_modes.pop(project_id, None)
             self._subfolder_cache.pop(project_id, None)
+            empty_archives: List[str] = []
+            for arc in self.archives.values():
+                if project_id in arc.project_ids:
+                    arc.project_ids.remove(project_id)
+                    if not arc.project_ids:
+                        empty_archives.append(arc.id)
+            for arc_id in empty_archives:
+                del self.archives[arc_id]
             self._save()
 
     def update_project(self, project: DatasetProject):
         """更新项目"""
-        if project.is_virtual:
+        if project.is_virtual or project.archive_id is not None:
             return
         project.updated_at = datetime.now().isoformat()
         self.projects[project.id] = project
         self._save()
 
     # ------------------------------------------------------------------
-    # Query (with virtual subfolder expansion)
+    # Archive CRUD
+    # ------------------------------------------------------------------
+
+    def add_archive(self, archive: DatasetArchive):
+        self.archives[archive.id] = archive
+        self._save()
+
+    def remove_archive(self, archive_id: str):
+        if archive_id in self.archives:
+            del self.archives[archive_id]
+            self._save()
+
+    def get_archive(self, archive_id: str) -> Optional[DatasetArchive]:
+        return self.archives.get(archive_id)
+
+    def get_all_archives(self) -> List[DatasetArchive]:
+        return list(self.archives.values())
+
+    def clean_orphan_archive_entries(self):
+        """删除 self.projects 中 ID 以 archive:: 开头的孤儿条目并保存"""
+        orphans = [pid for pid in self.projects if pid.startswith(_ARCHIVE_PREFIX)]
+        if orphans:
+            for pid in orphans:
+                del self.projects[pid]
+            self._save()
+
+    def get_real_projects(self, exclude_archived: bool = False) -> List[DatasetProject]:
+        """仅返回真实（非虚拟）项目列表，用于归档对话框等。
+
+        当 *exclude_archived* 为 True 时，已经属于某个归档的项目不会返回。
+        """
+        archived_ids: set = set()
+        if exclude_archived:
+            for arc in self.archives.values():
+                archived_ids.update(arc.project_ids)
+        return [p for p in self.projects.values()
+                if not p.is_virtual and p.id not in archived_ids]
+
+    def get_archive_directories(self, archive_id: str) -> List[str]:
+        """返回归档内所有成员的目录列表"""
+        arc = self.archives.get(archive_id)
+        if arc is None:
+            return []
+        dirs: List[str] = []
+        for pid in arc.project_ids:
+            proj = self.projects.get(pid)
+            if proj and os.path.isdir(proj.directory):
+                dirs.append(proj.directory)
+        return dirs
+
+    def get_directories(self, project_id: str) -> List[str]:
+        """获取项目对应的目录列表（归档聚合 -> 多目录, 其他 -> 单目录）"""
+        proj = self.get_project(project_id)
+        if proj is None:
+            return []
+        if proj.is_archive_root and proj.archive_id:
+            return self.get_archive_directories(proj.archive_id)
+        if proj.directory and os.path.isdir(proj.directory):
+            return [proj.directory]
+        return []
+
+    # ------------------------------------------------------------------
+    # Query (with virtual subfolder / archive expansion)
     # ------------------------------------------------------------------
 
     def get_project(self, project_id: str) -> Optional[DatasetProject]:
-        """获取项目，支持虚拟子文件夹 ID"""
+        """获取项目，支持虚拟子文件夹 ID 和归档虚拟 ID"""
+        if project_id.startswith(_ARCHIVE_PREFIX):
+            return self._resolve_archive_entry(project_id)
         if _SUBFOLDER_SEP in project_id:
             parent_id, subfolder = project_id.split(_SUBFOLDER_SEP, 1)
             parent = self.projects.get(parent_id)
@@ -182,16 +296,33 @@ class ProjectManager:
             return self._make_virtual(parent, subfolder)
         return self.projects.get(project_id)
 
-    def get_all_projects(self) -> List[DatasetProject]:
-        """获取所有项目；启用子文件夹模式的项目会展开为虚拟条目"""
+    def get_all_projects(self, exclude_archived: bool = False) -> List[DatasetProject]:
+        """获取所有项目；启用子文件夹模式的项目会展开为虚拟条目；归档追加在末尾。
+
+        当 *exclude_archived* 为 True 时，已被归档的数据集不再作为独立条目
+        出现——它们只在归档分组内可见，避免 ComboBox 出现重复选项。
+        """
+        archived_ids: set = set()
+        if exclude_archived:
+            for arc in self.archives.values():
+                archived_ids.update(arc.project_ids)
+
         result: List[DatasetProject] = []
         for proj in self.projects.values():
+            if proj.id in archived_ids:
+                continue
             if self._subfolder_modes.get(proj.id, False):
                 subfolders = self.detect_subfolders(proj.id)
                 for sf in subfolders:
                     result.append(self._make_virtual(proj, sf))
             else:
                 result.append(proj)
+        for arc in self.archives.values():
+            result.append(self._make_archive_root(arc))
+            for pid in arc.project_ids:
+                member = self.projects.get(pid)
+                if member:
+                    result.append(self._make_archive_member(arc, member))
         return result
 
     # ------------------------------------------------------------------
@@ -283,6 +414,64 @@ class ProjectManager:
             parent_id=parent.id,
         )
 
+    def _make_archive_root(self, archive: DatasetArchive) -> DatasetProject:
+        """生成归档聚合虚拟条目（代表整个归档）"""
+        total_images = 0
+        total_annotated = 0
+        for pid in archive.project_ids:
+            proj = self.projects.get(pid)
+            if proj:
+                total_images += proj.image_count
+                total_annotated += proj.annotated_count
+        return DatasetProject(
+            id=f"{_ARCHIVE_PREFIX}{archive.id}",
+            name=f"[归档] {archive.name}",
+            directory="",
+            image_count=total_images,
+            annotated_count=total_annotated,
+            created_at=archive.created_at,
+            updated_at=archive.updated_at,
+            is_archive_root=True,
+            archive_id=archive.id,
+        )
+
+    def _make_archive_member(self, archive: DatasetArchive, member: DatasetProject) -> DatasetProject:
+        """生成归档成员虚拟条目"""
+        return DatasetProject(
+            id=f"{_ARCHIVE_PREFIX}{archive.id}{_ARCHIVE_SEP}{member.id}",
+            name=f"  └ {archive.name}/{member.name}",
+            directory=member.directory,
+            image_count=member.image_count,
+            annotated_count=member.annotated_count,
+            created_at=member.created_at,
+            updated_at=member.updated_at,
+            archive_id=archive.id,
+        )
+
+    def extract_archive_id(self, project_id: str) -> Optional[str]:
+        """从归档虚拟 ID 中提取 archive_id，非归档 ID 返回 None"""
+        if not project_id.startswith(_ARCHIVE_PREFIX):
+            return None
+        body = project_id[len(_ARCHIVE_PREFIX):]
+        if _ARCHIVE_SEP in body:
+            return body.split(_ARCHIVE_SEP, 1)[0]
+        return body
+
+    def _resolve_archive_entry(self, project_id: str) -> Optional[DatasetProject]:
+        """解析归档虚拟 ID -> DatasetProject"""
+        body = project_id[len(_ARCHIVE_PREFIX):]
+        if _ARCHIVE_SEP in body:
+            arc_id, member_id = body.split(_ARCHIVE_SEP, 1)
+            arc = self.archives.get(arc_id)
+            member = self.projects.get(member_id)
+            if arc and member:
+                return self._make_archive_member(arc, member)
+            return None
+        arc = self.archives.get(body)
+        if arc:
+            return self._make_archive_root(arc)
+        return None
+
 
 @dataclass
 class AnnotationStats:
@@ -310,30 +499,35 @@ class ImageInfo:
 
 
 class ImageScanner(QThread):
-    """异步图片扫描线程"""
+    """异步图片扫描线程，支持单目录或多目录扫描"""
     progress = pyqtSignal(int, int)  # current, total
     finished = pyqtSignal(list, object)  # image_infos, AnnotationStats
     
-    def __init__(self, directory: str, classes_file: str = None, recursive: bool = True):
+    def __init__(self, directory: str = "", classes_file: str = None,
+                 recursive: bool = True, directories: List[str] = None):
         super().__init__()
-        self.directory = directory
+        if directories:
+            self._directories = list(directories)
+        else:
+            self._directories = [directory] if directory else []
+        self.directory = self._directories[0] if self._directories else ""
         self.classes_file = classes_file
         self.recursive = recursive
         self._is_cancelled = False
-        self._class_names = []  # YOLO 类别名称列表
-        self._voc_label_cache: Dict[tuple[str, int], List[str]] = {}
+        self._class_names: List[str] = []
+        self._voc_label_cache: Dict[Tuple[str, int], List[str]] = {}
     
     def _load_classes(self):
         """加载 YOLO classes.txt 文件"""
-        # 尝试多个可能的位置
-        possible_paths = [
-            Path(self.directory) / "classes.txt",
-            Path(self.directory) / "labels" / "classes.txt",
-            Path(self.directory) / ".." / "classes.txt",
-        ]
+        possible_paths: List[Path] = []
         if self.classes_file:
-            possible_paths.insert(0, Path(self.classes_file))
-        
+            possible_paths.append(Path(self.classes_file))
+        for d in self._directories:
+            possible_paths.extend([
+                Path(d) / "classes.txt",
+                Path(d) / "labels" / "classes.txt",
+                Path(d) / ".." / "classes.txt",
+            ])
         for path in possible_paths:
             if path.exists():
                 try:
@@ -401,20 +595,21 @@ class ImageScanner(QThread):
         stats = AnnotationStats()
         label_counter = Counter()
         
-        # 加载类别名称
         self._load_classes()
         
-        # 收集所有文件
-        if self.recursive:
-            for root, _, files in os.walk(self.directory):
-                for file in files:
-                    if Path(file).suffix.lower() in SUPPORTED_IMAGE_FORMATS:
-                        all_files.append(os.path.join(root, file))
-        else:
-            for file in os.listdir(self.directory):
-                full = os.path.join(self.directory, file)
-                if os.path.isfile(full) and Path(file).suffix.lower() in SUPPORTED_IMAGE_FORMATS:
-                    all_files.append(full)
+        for directory in self._directories:
+            if not os.path.isdir(directory):
+                continue
+            if self.recursive:
+                for root, _, files in os.walk(directory):
+                    for file in files:
+                        if Path(file).suffix.lower() in SUPPORTED_IMAGE_FORMATS:
+                            all_files.append(os.path.join(root, file))
+            else:
+                for file in os.listdir(directory):
+                    full = os.path.join(directory, file)
+                    if os.path.isfile(full) and Path(file).suffix.lower() in SUPPORTED_IMAGE_FORMATS:
+                        all_files.append(full)
         
         total = len(all_files)
         stats.total_images = total
@@ -524,20 +719,43 @@ class ProjectListWidget(CardWidget):
         
         layout.addLayout(btn_layout)
     
+    @staticmethod
+    def _format_project_text(project: DatasetProject) -> str:
+        if project.is_archive_root:
+            return (
+                f"{project.name}\n"
+                f"📦 {project.image_count} 张图片 · ✅ {project.annotated_count} 已标注"
+            )
+        if project.archive_id and not project.is_archive_root:
+            return (
+                f"{project.name}\n"
+                f"📁 {project.directory}\n"
+                f"🖼 {project.image_count} 张"
+            )
+        text = f"{project.name}\n"
+        text += f"📁 {project.directory}\n"
+        text += f"🖼 {project.image_count} 张图片 · ✅ {project.annotated_count} 已标注"
+        return text
+
     def add_project_item(self, project: DatasetProject, select: bool = False):
         """添加项目项"""
         item = QListWidgetItem()
         item.setData(Qt.UserRole, project.id)
-        
-        # 格式化显示文本
-        text = f"{project.name}\n"
-        text += f"📁 {project.directory}\n"
-        text += f"🖼 {project.image_count} 张图片 · ✅ {project.annotated_count} 已标注"
-        item.setText(text)
-        item.setSizeHint(QSize(0, 80))
-        
+        item.setText(self._format_project_text(project))
+
+        if project.is_archive_root:
+            hl = QApplication.palette().color(QPalette.Highlight)
+            hl.setAlpha(30)
+            item.setBackground(hl)
+            item.setSizeHint(QSize(0, 56))
+        elif project.archive_id:
+            item.setBackground(QApplication.palette().color(QPalette.AlternateBase))
+            item.setSizeHint(QSize(0, 68))
+        else:
+            item.setSizeHint(QSize(0, 80))
+
         self.project_list.addItem(item)
-        
+
         if select:
             self.project_list.setCurrentItem(item)
             self.delete_btn.setEnabled(True)
@@ -547,10 +765,7 @@ class ProjectListWidget(CardWidget):
         for i in range(self.project_list.count()):
             item = self.project_list.item(i)
             if item.data(Qt.UserRole) == project.id:
-                text = f"{project.name}\n"
-                text += f"📁 {project.directory}\n"
-                text += f"🖼 {project.image_count} 张图片 · ✅ {project.annotated_count} 已标注"
-                item.setText(text)
+                item.setText(self._format_project_text(project))
                 break
     
     def remove_project_item(self, project_id: str):
@@ -583,14 +798,30 @@ class ProjectListWidget(CardWidget):
             item = self.project_list.item(i)
             if item.data(Qt.UserRole) == project_id:
                 self.project_list.setCurrentItem(item)
-                self.delete_btn.setEnabled(not (_SUBFOLDER_SEP in project_id))
+                is_subfolder = _SUBFOLDER_SEP in project_id
+                is_archive_member = (
+                    project_id.startswith(_ARCHIVE_PREFIX) and _ARCHIVE_SEP in project_id
+                )
+                self.delete_btn.setEnabled(not is_subfolder and not is_archive_member)
                 break
         self.project_list.blockSignals(False)
 
     def _on_item_clicked(self, item: QListWidgetItem):
         """项目点击"""
         project_id = item.data(Qt.UserRole)
-        self.delete_btn.setEnabled(not (_SUBFOLDER_SEP in project_id))
+        is_subfolder = _SUBFOLDER_SEP in project_id
+        is_archive_member = (
+            project_id.startswith(_ARCHIVE_PREFIX) and _ARCHIVE_SEP in project_id
+        )
+        is_archive_root = (
+            project_id.startswith(_ARCHIVE_PREFIX) and _ARCHIVE_SEP not in project_id
+        )
+        can_delete = not is_subfolder and not is_archive_member
+        self.delete_btn.setEnabled(can_delete)
+        if is_archive_root:
+            self.delete_btn.setText("解散归档")
+        else:
+            self.delete_btn.setText("删除")
         self.project_selected.emit(project_id)
 
 
@@ -1313,6 +1544,83 @@ class ImageListPanel(CardWidget):
         return [item.data(Qt.UserRole) for item in self.image_list.selectedItems()]
 
 
+class CreateArchiveDialog(QDialog):
+    """创建数据集归档对话框"""
+
+    def __init__(self, projects: List[DatasetProject], parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("创建数据集归档")
+        self.setMinimumSize(420, 400)
+        self._projects = projects
+        self._setup_ui()
+
+    def _setup_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+
+        layout.addWidget(StrongBodyLabel("归档名称"))
+        self.name_edit = QLineEdit()
+        self.name_edit.setPlaceholderText("输入归档名称")
+        self.name_edit.textChanged.connect(self._validate)
+        layout.addWidget(self.name_edit)
+
+        layout.addWidget(StrongBodyLabel("选择数据集（至少 2 个）"))
+
+        self.project_list = QListWidget()
+        self.project_list.setSelectionMode(QAbstractItemView.NoSelection)
+        for proj in self._projects:
+            item = QListWidgetItem(f"{proj.name}  ({proj.image_count} 张)")
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Unchecked)
+            item.setData(Qt.UserRole, proj.id)
+            self.project_list.addItem(item)
+        self.project_list.itemChanged.connect(self._validate)
+        layout.addWidget(self.project_list, 1)
+
+        self.hint_label = CaptionLabel("")
+        self.hint_label.setStyleSheet("color: #e53935;")
+        layout.addWidget(self.hint_label)
+
+        self.button_box = QDialogButtonBox(
+            QDialogButtonBox.Ok | QDialogButtonBox.Cancel
+        )
+        self.button_box.button(QDialogButtonBox.Ok).setText("创建")
+        self.button_box.button(QDialogButtonBox.Cancel).setText("取消")
+        self.button_box.accepted.connect(self.accept)
+        self.button_box.rejected.connect(self.reject)
+        layout.addWidget(self.button_box)
+
+        self._validate()
+
+    def _validate(self, *_args):
+        name_ok = bool(self.name_edit.text().strip())
+        checked = self._checked_ids()
+        count_ok = len(checked) >= 2
+        ok_btn = self.button_box.button(QDialogButtonBox.Ok)
+        ok_btn.setEnabled(name_ok and count_ok)
+        if not name_ok:
+            self.hint_label.setText("请输入归档名称")
+        elif not count_ok:
+            self.hint_label.setText(f"已选 {len(checked)} 个，至少选择 2 个数据集")
+        else:
+            self.hint_label.setText(f"已选 {len(checked)} 个数据集")
+            self.hint_label.setStyleSheet("color: #43a047;")
+            return
+        self.hint_label.setStyleSheet("color: #e53935;")
+
+    def _checked_ids(self) -> List[str]:
+        ids: List[str] = []
+        for i in range(self.project_list.count()):
+            item = self.project_list.item(i)
+            if item.checkState() == Qt.Checked:
+                ids.append(item.data(Qt.UserRole))
+        return ids
+
+    def get_result(self):
+        """返回 (名称, 选中的项目ID列表)"""
+        return self.name_edit.text().strip(), self._checked_ids()
+
+
 class DatasetPage(QWidget):
     """数据集管理页面"""
     
@@ -1432,12 +1740,16 @@ class DatasetPage(QWidget):
         self.batch_annotate_btn.clicked.connect(self._on_batch_annotate_clicked)
         layout.addWidget(self.batch_annotate_btn)
 
+        self.archive_btn = PushButton("创建归档", self, FIF.ZIP_FOLDER)
+        self.archive_btn.clicked.connect(self._on_create_archive)
+        layout.addWidget(self.archive_btn)
+
         return header
     
     def _load_projects(self):
-        """加载所有项目"""
+        """加载所有项目（已归档的数据集只在归档组内显示）"""
         self.project_list_widget.clear_projects()
-        projects = self.project_manager.get_all_projects()
+        projects = self.project_manager.get_all_projects(exclude_archived=True)
         for project in projects:
             self.project_list_widget.add_project_item(project)
     
@@ -1483,9 +1795,14 @@ class DatasetPage(QWidget):
         )
     
     def _on_delete_project(self):
-        """删除项目"""
+        """删除项目或解散归档"""
         project_id = self.project_list_widget.get_selected_project_id()
         if not project_id or _SUBFOLDER_SEP in project_id:
+            return
+
+        # 归档聚合条目 -> 解散归档
+        if project_id.startswith(_ARCHIVE_PREFIX):
+            self._on_delete_archive(project_id)
             return
 
         project = self.project_manager.get_project(project_id)
@@ -1502,30 +1819,10 @@ class DatasetPage(QWidget):
         
         if reply == QMessageBox.Yes:
             self.project_manager.remove_project(project_id)
-
-            # 刷新列表（删除后可能有虚拟条目也需要移除）
             self._load_projects()
-
-            cur = self.current_project
-            needs_clear = (
-                cur is not None
-                and (cur.id == project_id or cur.parent_id == project_id)
+            self._clear_current_if(
+                lambda cur: cur.id == project_id or cur.parent_id == project_id
             )
-            if needs_clear:
-                self.current_project = None
-                self.image_infos.clear()
-                self.image_paths.clear()
-                self.filtered_image_paths.clear()
-                self.image_list_panel.clear()
-                self.preview_widget.set_image(None)
-                self.statistics_panel.clear()
-                self.refresh_btn.setEnabled(False)
-                self.annotate_btn.setEnabled(False)
-                self.batch_annotate_btn.setEnabled(False)
-                self.subfolder_switch.setVisible(False)
-                self.subfolder_switch.setEnabled(False)
-                self.status_label.setText("选择或创建数据集项目")
-            
             InfoBar.success(
                 title="成功",
                 content=f"已删除项目: {project.name}",
@@ -1535,6 +1832,123 @@ class DatasetPage(QWidget):
                 duration=3000,
                 parent=self
             )
+
+    def _on_create_archive(self):
+        """打开创建归档对话框"""
+        real_projects = self.project_manager.get_real_projects(exclude_archived=True)
+        if len(real_projects) < 2:
+            InfoBar.warning(
+                title="提示",
+                content="至少需要 2 个数据集才能创建归档",
+                orient=Qt.Horizontal,
+                isClosable=True,
+                position=InfoBarPosition.TOP,
+                duration=3000,
+                parent=self,
+            )
+            return
+
+        dialog = CreateArchiveDialog(real_projects, self)
+        if dialog.exec_() != QDialog.Accepted:
+            return
+
+        name, project_ids = dialog.get_result()
+        if not name or len(project_ids) < 2:
+            return
+
+        existing_names = {a.name for a in self.project_manager.archives.values()}
+        if name in existing_names:
+            InfoBar.warning(
+                title="名称重复",
+                content=f"归档名称 \"{name}\" 已存在，请使用其他名称",
+                orient=Qt.Horizontal,
+                isClosable=True,
+                position=InfoBarPosition.TOP,
+                duration=3000,
+                parent=self,
+            )
+            return
+
+        archive = DatasetArchive.create(name, project_ids)
+        self.project_manager.add_archive(archive)
+        self._load_projects()
+
+        InfoBar.success(
+            title="成功",
+            content=f"已创建归档: {name} ({len(project_ids)} 个数据集)",
+            orient=Qt.Horizontal,
+            isClosable=True,
+            position=InfoBarPosition.TOP,
+            duration=3000,
+            parent=self,
+        )
+
+    def _on_delete_archive(self, project_id: str):
+        """解散归档"""
+        project = self.project_manager.get_project(project_id)
+        arc_id_from_pid = self.project_manager.extract_archive_id(project_id)
+
+        arc = None
+        arc_name = ""
+        if project and project.archive_id:
+            arc = self.project_manager.get_archive(project.archive_id)
+        if not arc and arc_id_from_pid:
+            arc = self.project_manager.get_archive(arc_id_from_pid)
+
+        if arc:
+            arc_name = arc.name
+        else:
+            orphan = self.project_manager.projects.get(project_id)
+            arc_name = orphan.name if orphan else project_id
+
+        reply = QMessageBox.question(
+            self,
+            "解散归档",
+            f"确定要解散归档 \"{arc_name}\" 吗？\n\n（成员数据集不受影响）",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply == QMessageBox.Yes:
+            if arc:
+                self.project_manager.remove_archive(arc.id)
+            self.project_manager.clean_orphan_archive_entries()
+            self._load_projects()
+            effective_arc_id = arc.id if arc else arc_id_from_pid
+
+            def _belongs_to_disbanded_archive(cur):
+                if cur.archive_id == effective_arc_id:
+                    return True
+                parsed = self.project_manager.extract_archive_id(cur.id)
+                return parsed is not None and not self.project_manager.get_archive(parsed)
+
+            self._clear_current_if(_belongs_to_disbanded_archive)
+            InfoBar.success(
+                title="成功",
+                content=f"已解散归档: {arc_name}",
+                orient=Qt.Horizontal,
+                isClosable=True,
+                position=InfoBarPosition.TOP,
+                duration=3000,
+                parent=self,
+            )
+
+    def _clear_current_if(self, predicate):
+        """若当前项目满足 predicate 则清空中间面板"""
+        cur = self.current_project
+        if cur is not None and predicate(cur):
+            self.current_project = None
+            self.image_infos.clear()
+            self.image_paths.clear()
+            self.filtered_image_paths.clear()
+            self.image_list_panel.clear()
+            self.preview_widget.set_image(None)
+            self.statistics_panel.clear()
+            self.refresh_btn.setEnabled(False)
+            self.annotate_btn.setEnabled(False)
+            self.batch_annotate_btn.setEnabled(False)
+            self.subfolder_switch.setVisible(False)
+            self.subfolder_switch.setEnabled(False)
+            self.status_label.setText("选择或创建数据集项目")
     
     def _on_project_selected(self, project_id: str):
         """项目选择"""
@@ -1602,6 +2016,24 @@ class DatasetPage(QWidget):
         self.preview_widget.set_image(None)
         self.statistics_panel.clear()
 
+        # 归档聚合条目 -> 多目录扫描
+        if project.is_archive_root and project.archive_id:
+            dirs = self.project_manager.get_archive_directories(project.archive_id)
+            if not dirs:
+                self.status_label.setText("归档内没有有效的目录")
+                return
+            self.subfolder_switch.setVisible(False)
+            self.subfolder_switch.setEnabled(False)
+            self.refresh_btn.setEnabled(True)
+            self.progress_bar.setVisible(True)
+            self.progress_bar.setValue(0)
+            self.status_label.setText(f"正在扫描归档: {project.name}...")
+            self._scanner = ImageScanner(directories=dirs)
+            self._scanner.progress.connect(self._on_scan_progress)
+            self._scanner.finished.connect(self._on_scan_finished)
+            self._scanner.start()
+            return
+
         if not os.path.isdir(project.directory):
             InfoBar.error(
                 title="错误",
@@ -1617,20 +2049,22 @@ class DatasetPage(QWidget):
 
         # 更新子文件夹模式开关的可见性
         real_id = project.parent_id if project.is_virtual else project.id
-        has_subs = self.project_manager.has_subfolders(real_id)
-        self.subfolder_switch.setVisible(has_subs)
-        self.subfolder_switch.setEnabled(has_subs)
-        # 同步开关状态（不触发信号）
-        self.subfolder_switch.blockSignals(True)
-        self.subfolder_switch.setChecked(self.project_manager.is_subfolder_mode(real_id))
-        self.subfolder_switch.blockSignals(False)
+        if not project.archive_id:
+            has_subs = self.project_manager.has_subfolders(real_id)
+            self.subfolder_switch.setVisible(has_subs)
+            self.subfolder_switch.setEnabled(has_subs)
+            self.subfolder_switch.blockSignals(True)
+            self.subfolder_switch.setChecked(self.project_manager.is_subfolder_mode(real_id))
+            self.subfolder_switch.blockSignals(False)
+        else:
+            self.subfolder_switch.setVisible(False)
+            self.subfolder_switch.setEnabled(False)
 
         self.refresh_btn.setEnabled(True)
         self.progress_bar.setVisible(True)
         self.progress_bar.setValue(0)
         self.status_label.setText(f"正在扫描: {project.name}...")
 
-        # (root) 虚拟条目只扫描根目录文件
         recursive = not (project.is_virtual and project.subfolder == "(root)")
         self._scanner = ImageScanner(project.directory, recursive=recursive)
         self._scanner.progress.connect(self._on_scan_progress)

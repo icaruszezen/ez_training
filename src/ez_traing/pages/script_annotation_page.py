@@ -457,7 +457,7 @@ if __name__ == "__main__":
         self.dataset_combo.clear()
         self._project_ids.clear()
 
-        projects = self._project_manager.get_all_projects()
+        projects = self._project_manager.get_all_projects(exclude_archived=True)
         for proj in projects:
             self.dataset_combo.addItem(f"{proj.name} ({proj.image_count} 张)")
             self._project_ids.append(proj.id)
@@ -493,9 +493,15 @@ if __name__ == "__main__":
         if not project:
             self.dataset_info_label.setText("数据集不存在")
             return
-        self.dataset_info_label.setText(
-            f"项目: {project.name}\n目录: {project.directory}\n记录图片数: {project.image_count}"
-        )
+        if project.is_archive_root:
+            dirs = self._project_manager.get_archive_directories(project.archive_id)
+            self.dataset_info_label.setText(
+                f"归档: {project.name}\n包含 {len(dirs)} 个目录\n记录图片数: {project.image_count}"
+            )
+        else:
+            self.dataset_info_label.setText(
+                f"项目: {project.name}\n目录: {project.directory}\n记录图片数: {project.image_count}"
+            )
 
     def _on_run_script(self) -> None:
         if self._process and self._process.state() != QProcess.NotRunning:
@@ -515,15 +521,22 @@ if __name__ == "__main__":
             self._show_warning("运行脚本", "请先选择数据集")
             return
 
-        dataset_dir = project.directory
-        if not os.path.isdir(dataset_dir):
-            self._show_error("运行失败", f"数据集目录不存在: {dataset_dir}")
+        dirs = (self._project_manager.get_directories(project.id)
+                if self._project_manager else [])
+        if not dirs:
+            self._show_error("运行失败",
+                             "归档内没有有效目录" if project.is_archive_root
+                             else f"数据集目录不存在: {project.directory}")
             return
+        dataset_dir = dirs[0]
 
         process = QProcess(self)
         process.setProcessChannelMode(QProcess.SeparateChannels)
         process.setProgram(sys.executable)
-        process.setArguments([str(self._current_script_path), "--dataset_dir", dataset_dir])
+        args = [str(self._current_script_path), "--dataset_dir", dataset_dir]
+        if len(dirs) > 1:
+            args.extend(["--extra_dirs"] + dirs[1:])
+        process.setArguments(args)
         process.setWorkingDirectory(str(self._current_script_path.parent))
 
         process.readyReadStandardOutput.connect(self._on_process_stdout)

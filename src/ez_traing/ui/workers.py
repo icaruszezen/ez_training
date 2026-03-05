@@ -45,14 +45,18 @@ class ThumbnailLoader(QThread):
 
 
 class ImageScanWorker(QThread):
-    """Scan a directory tree for images, optionally keyed by project id."""
+    """Scan one or more directory trees for images, keyed by project id."""
 
     finished = pyqtSignal(str, list, str, float)  # project_id, paths, error, elapsed_sec
 
-    def __init__(self, project_id: str, directory: str):
+    def __init__(self, project_id: str, directory: str = "",
+                 directories: List[str] = None):
         super().__init__()
         self._project_id = project_id
-        self._directory = directory
+        if directories:
+            self._directories = list(directories)
+        else:
+            self._directories = [directory] if directory else []
         self._cancelled = False
 
     def cancel(self):
@@ -65,12 +69,15 @@ class ImageScanWorker(QThread):
         paths: List[str] = []
         error = ""
         try:
-            for root, _, files in os.walk(self._directory):
+            for directory in self._directories:
                 if self._cancelled:
                     break
-                for f in files:
-                    if Path(f).suffix.lower() in SUPPORTED_IMAGE_FORMATS:
-                        paths.append(os.path.join(root, f))
+                for root, _, files in os.walk(directory):
+                    if self._cancelled:
+                        break
+                    for f in files:
+                        if Path(f).suffix.lower() in SUPPORTED_IMAGE_FORMATS:
+                            paths.append(os.path.join(root, f))
             paths.sort()
         except OSError as e:
             error = str(e)

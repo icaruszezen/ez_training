@@ -379,7 +379,7 @@ class PrelabelingPage(QWidget):
         self.dataset_combo.clear()
         self._project_ids.clear()
 
-        projects = self._project_manager.get_all_projects()
+        projects = self._project_manager.get_all_projects(exclude_archived=True)
         for project in projects:
             self.dataset_combo.addItem(f"{project.name} ({project.image_count} 张图片)")
             self._project_ids.append(project.id)
@@ -412,7 +412,14 @@ class PrelabelingPage(QWidget):
 
     def _scan_project_images(self, project) -> None:
         """扫描项目目录下的所有图片文件"""
-        if not os.path.isdir(project.directory):
+        dirs = (self._project_manager.get_directories(project.id)
+                if self._project_manager else [])
+        if project.is_archive_root:
+            if not dirs:
+                self._image_paths.clear()
+                self.dataset_info_label.setText("归档内没有有效目录")
+                return
+        elif not os.path.isdir(project.directory):
             self._image_paths.clear()
             self.dataset_info_label.setText("目录不存在")
             self._log(f"目录不存在: {project.directory}", level="error")
@@ -424,26 +431,32 @@ class PrelabelingPage(QWidget):
             )
             return
 
-        project_dir = Path(project.directory)
-        try:
-            directory_mtime = project_dir.stat().st_mtime_ns
-        except OSError:
-            directory_mtime = -1
-        cache_key = project.id
-        cached = self._scan_cache.get(cache_key)
-        if cached is not None and cached[0] == directory_mtime:
-            self._image_paths = list(cached[1])
-            count = len(self._image_paths)
-            self.dataset_info_label.setText(f"已加载 {count} 张图片（缓存）")
-            self._log(f"数据集 '{project.name}' 读取缓存，共 {count} 张图片")
-            return
+        if not project.is_archive_root:
+            project_dir = Path(project.directory)
+            try:
+                directory_mtime = project_dir.stat().st_mtime_ns
+            except OSError:
+                directory_mtime = -1
+            cache_key = project.id
+            cached = self._scan_cache.get(cache_key)
+            if cached is not None and cached[0] == directory_mtime:
+                self._image_paths = list(cached[1])
+                count = len(self._image_paths)
+                self.dataset_info_label.setText(f"已加载 {count} 张图片（缓存）")
+                self._log(f"数据集 '{project.name}' 读取缓存，共 {count} 张图片")
+                return
 
         if self._scan_worker and self._scan_worker.isRunning():
             self._scan_worker.cancel()
 
         self.dataset_info_label.setText("正在扫描图片...")
         self._log(f"开始扫描数据集 '{project.name}' ...")
-        self._scan_worker = ProjectImageScanWorker(project.id, project.directory)
+        if project.is_archive_root:
+            self._scan_worker = ProjectImageScanWorker(
+                project.id, directories=dirs)
+        else:
+            self._scan_worker = ProjectImageScanWorker(
+                project.id, project.directory)
         self._scan_worker.finished.connect(self._on_project_scan_finished)
         self._scan_worker.start()
 

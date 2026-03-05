@@ -44,11 +44,12 @@ class DataPrepConfig:
     skip_unlabeled: bool = True
     overwrite_output: bool = True
     custom_classes_file: Optional[str] = None
+    dataset_dirs: List[str] = field(default_factory=list)
 
     def validate(self) -> None:
         if not self.dataset_name.strip():
             raise ValueError("数据集名称不能为空")
-        if not self.dataset_dir.strip():
+        if not self.dataset_dirs and not self.dataset_dir.strip():
             raise ValueError("数据集目录不能为空")
         if not self.output_dir.strip():
             raise ValueError("输出目录不能为空")

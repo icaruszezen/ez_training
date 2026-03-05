@@ -738,7 +738,7 @@ class BatchAnnotationPage(QWidget):
         self.dataset_combo.clear()
         self._project_ids.clear()
 
-        for proj in self._project_manager.get_all_projects():
+        for proj in self._project_manager.get_all_projects(exclude_archived=True):
             self.dataset_combo.addItem(f"{proj.name} ({proj.image_count} 张)")
             self._project_ids.append(proj.id)
 
@@ -770,20 +770,23 @@ class BatchAnnotationPage(QWidget):
         proj = self._project_manager.get_project(self._project_ids[index])
         if not proj:
             return
-        if not os.path.isdir(proj.directory):
-            InfoBar.error(
-                title="错误",
-                content=f"目录不存在: {proj.directory}",
-                parent=self,
-                position=InfoBarPosition.TOP,
-                duration=3000,
-            )
+
+        dirs = self._project_manager.get_directories(proj.id)
+        if not dirs:
+            if not proj.is_archive_root:
+                InfoBar.error(
+                    title="错误",
+                    content=f"目录不存在: {proj.directory}",
+                    parent=self,
+                    position=InfoBarPosition.TOP,
+                    duration=3000,
+                )
             return
 
-        self._current_directory = proj.directory
+        self._current_directory = dirs[0]
         self._reset_sample_state()
         self.status_label.setText(f"正在扫描: {proj.name}...")
-        self._scan_worker = ImageScanWorker(proj.id, proj.directory)
+        self._scan_worker = ImageScanWorker(proj.id, directories=dirs)
         self._scan_worker.finished.connect(self._on_scan_finished)
         self._scan_worker.start()
 

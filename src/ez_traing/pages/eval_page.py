@@ -289,7 +289,7 @@ class EvalConfigPanel(CardWidget):
         if self._project_manager is None:
             return
         self.dataset_combo.clear()
-        for proj in self._project_manager.get_all_projects():
+        for proj in self._project_manager.get_all_projects(exclude_archived=True):
             self.dataset_combo.addItem(proj.name, proj.id)
 
     def _refresh_train_runs(self):
@@ -407,8 +407,30 @@ class EvalConfigPanel(CardWidget):
             )
             return
 
+        dirs = (self._project_manager.get_directories(project_id)
+                if self._project_manager else [])
+        if not dirs:
+            InfoBar.error(
+                title="错误",
+                content="归档内没有有效目录" if project.is_archive_root
+                        else f"数据集目录不存在: {project.directory}",
+                parent=self.window(),
+                position=InfoBarPosition.TOP,
+            )
+            return
+
+        if project.is_archive_root and len(dirs) > 1:
+            InfoBar.warning(
+                title="提示",
+                content=f"归档包含 {len(dirs)} 个目录，评估仅使用第一个目录: {Path(dirs[0]).name}",
+                parent=self.window(),
+                position=InfoBarPosition.TOP,
+                duration=5000,
+            )
+
         config = {
             "project": project,
+            "dataset_dir": dirs[0],
             "model_path": model_path,
             "imgsz": self.imgsz_spin.value(),
             "batch": self.batch_spin.value(),
@@ -737,9 +759,10 @@ class EvalPage(QWidget):
             return
 
         project: DatasetProject = config_data["project"]
+        dataset_dir = config_data.get("dataset_dir", project.directory)
         config = EvalConfig(
             dataset_name=project.name,
-            dataset_dir=project.directory,
+            dataset_dir=dataset_dir,
             model_path=config_data["model_path"],
             imgsz=config_data["imgsz"],
             batch=config_data["batch"],

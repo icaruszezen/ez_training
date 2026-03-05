@@ -25,20 +25,26 @@ def _normalize_base_stem(stem: str) -> str:
     return value or stem.lower()
 
 
-def _leakage_group_key(sample: DatasetSample, dataset_root: Optional[Path] = None) -> str:
+def _leakage_group_key(
+    sample: DatasetSample,
+    dataset_roots: Optional[List[Path]] = None,
+) -> str:
     """生成防泄露分组 key：同目录同源主干视为一组。
 
-    使用相对于 *dataset_root* 的完整父路径作为目录标识，
+    使用相对于 *dataset_roots* 中匹配根的完整父路径作为目录标识，
     避免不同子树下同名目录的样本被错误归组。
+    多根时添加根索引前缀以区分不同来源。
     """
     path: Path = sample.image_path
-    if dataset_root is not None:
-        try:
-            parent = path.relative_to(dataset_root).parent.as_posix().lower()
-        except ValueError:
-            parent = path.parent.name.lower()
-    else:
-        parent = path.parent.name.lower()
+    parent: str = path.parent.name.lower()
+    if dataset_roots:
+        for idx, root in enumerate(dataset_roots):
+            try:
+                rel_parent = path.relative_to(root).parent.as_posix().lower()
+                parent = f"r{idx}_{rel_parent}" if len(dataset_roots) > 1 else rel_parent
+                break
+            except ValueError:
+                continue
     base = _normalize_base_stem(path.stem)
     return f"{parent}::{base}"
 
@@ -47,7 +53,7 @@ def split_train_val(
     samples: List[DatasetSample],
     train_ratio: float,
     seed: int,
-    dataset_root: Optional[Path] = None,
+    dataset_roots: Optional[List[Path]] = None,
 ) -> Tuple[List[DatasetSample], List[DatasetSample]]:
     """按同源分组划分 train/val，避免数据泄露。"""
     if not samples:
@@ -55,7 +61,7 @@ def split_train_val(
 
     groups: DefaultDict[str, List[DatasetSample]] = defaultdict(list)
     for sample in samples:
-        groups[_leakage_group_key(sample, dataset_root)].append(sample)
+        groups[_leakage_group_key(sample, dataset_roots)].append(sample)
 
     grouped_items = list(groups.items())
     if len(grouped_items) < 2:

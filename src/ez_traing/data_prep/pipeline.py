@@ -45,9 +45,22 @@ class DataPrepPipeline:
         self.config.validate()
         self._log(log_callback, f"开始数据准备: {self.config.dataset_name}")
 
-        dataset_root = Path(self.config.dataset_dir)
-        if not dataset_root.exists():
-            raise ValueError(f"数据集目录不存在: {dataset_root}")
+        dataset_roots = []
+        if self.config.dataset_dirs:
+            for d in self.config.dataset_dirs:
+                p = Path(d)
+                if not p.exists():
+                    self._log(log_callback, f"[警告] 目录不存在，跳过: {p}")
+                else:
+                    dataset_roots.append(p)
+        else:
+            dataset_root_single = Path(self.config.dataset_dir)
+            if not dataset_root_single.exists():
+                raise ValueError(f"数据集目录不存在: {dataset_root_single}")
+            dataset_roots.append(dataset_root_single)
+
+        if not dataset_roots:
+            raise ValueError("没有可用的数据集目录")
 
         output_root = Path(self.config.output_dir)
         img_train_dir, img_val_dir, label_train_dir, label_val_dir = self._prepare_output_dirs(
@@ -55,9 +68,17 @@ class DataPrepPipeline:
         )
 
         scan_started_at = perf_counter()
-        samples, source_images, skipped_images = self._scan_samples(
-            dataset_root, log_callback, is_cancelled
-        )
+        all_samples = []
+        total_source = 0
+        total_skipped = 0
+        for dr in dataset_roots:
+            s, src, skp = self._scan_samples(dr, log_callback, is_cancelled)
+            all_samples.extend(s)
+            total_source += src
+            total_skipped += skp
+        samples = all_samples
+        source_images = total_source
+        skipped_images = total_skipped
         self._log(log_callback, f"扫描耗时: {perf_counter() - scan_started_at:.2f}s")
         if not samples:
             raise ValueError("没有可处理样本，请确认目录下存在图片和 VOC XML 标注")
@@ -82,14 +103,20 @@ class DataPrepPipeline:
                     f"[警告] 以下标签不在自定义类别中，对应标注框将被跳过: {sorted(unknown_labels)}",
                 )
         else:
-            existing_classes = load_existing_classes(dataset_root)
-            class_names = build_class_names(samples, existing_classes)
+            merged_existing: List[str] = []
+            seen: Set[str] = set()
+            for dr in dataset_roots:
+                for cls in load_existing_classes(dr):
+                    if cls not in seen:
+                        seen.add(cls)
+                        merged_existing.append(cls)
+            class_names = build_class_names(samples, merged_existing)
             if not class_names:
                 raise ValueError("未能从数据中提取到类别，请确认 VOC 标注有效")
         class_to_id = {name: i for i, name in enumerate(class_names)}
 
         train_samples, val_samples = split_train_val(
-            samples, self.config.train_ratio, self.config.random_seed, dataset_root
+            samples, self.config.train_ratio, self.config.random_seed, dataset_roots
         )
         self._log(
             log_callback,
@@ -131,7 +158,7 @@ class DataPrepPipeline:
             image_dir=img_train_dir,
             label_dir=label_train_dir,
             used_names=used_train_names,
-            dataset_root=dataset_root,
+            dataset_roots=dataset_roots,
             class_to_id=class_to_id,
             do_augment=aug_enabled,
             progress_total=total_steps,
@@ -150,7 +177,7 @@ class DataPrepPipeline:
             image_dir=img_val_dir,
             label_dir=label_val_dir,
             used_names=used_val_names,
-            dataset_root=dataset_root,
+            dataset_roots=dataset_roots,
             class_to_id=class_to_id,
             do_augment=aug_enabled and self.config.augment_scope == "both",
             progress_total=total_steps,
@@ -296,7 +323,7 @@ class DataPrepPipeline:
         image_dir: Path,
         label_dir: Path,
         used_names: Set[str],
-        dataset_root: Path,
+        dataset_roots: List[Path],
         class_to_id: Dict[str, int],
         do_augment: bool,
         progress_total: int,
@@ -325,7 +352,7 @@ class DataPrepPipeline:
                 height = sample.image_height
 
                 base_stem = self._unique_stem(
-                    self._make_stem(sample.image_path, dataset_root), used_names
+                    self._make_stem(sample.image_path, dataset_roots), used_names
                 )
                 base_ext = sample.image_path.suffix.lower()
                 if base_ext not in SUPPORTED_IMAGE_FORMATS:
@@ -450,10 +477,16 @@ class DataPrepPipeline:
             results.append(f.result())
         return results
 
-    def _make_stem(self, image_path: Path, dataset_root: Path) -> str:
-        try:
-            rel = image_path.relative_to(dataset_root).with_suffix("").as_posix()
-        except ValueError:
+    def _make_stem(self, image_path: Path, dataset_roots: List[Path]) -> str:
+        rel: Optional[str] = None
+        for idx, root in enumerate(dataset_roots):
+            try:
+                part = image_path.relative_to(root).with_suffix("").as_posix()
+                rel = f"r{idx}_{part}" if len(dataset_roots) > 1 else part
+                break
+            except ValueError:
+                continue
+        if rel is None:
             rel = image_path.stem
         rel = rel.replace("/", "_").replace("\\", "_")
         return re.sub(r"[^\w\-]+", "_", rel).strip("_") or "img"

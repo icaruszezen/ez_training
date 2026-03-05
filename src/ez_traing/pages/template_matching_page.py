@@ -867,7 +867,7 @@ class TemplateMatchingPage(QWidget):
         self.dataset_combo.clear()
         self._project_ids.clear()
 
-        for proj in self._project_manager.get_all_projects():
+        for proj in self._project_manager.get_all_projects(exclude_archived=True):
             self.dataset_combo.addItem(f"{proj.name} ({proj.image_count} 张图片)")
             self._project_ids.append(proj.id)
 
@@ -896,30 +896,42 @@ class TemplateMatchingPage(QWidget):
             self._scan_project(proj)
 
     def _scan_project(self, project):
-        if not os.path.isdir(project.directory):
+        dirs = (self._project_manager.get_directories(project.id)
+                if self._project_manager else [])
+        if project.is_archive_root:
+            if not dirs:
+                self._image_paths.clear()
+                self.dataset_info_label.setText("归档内没有有效目录")
+                return
+        elif not os.path.isdir(project.directory):
             self._image_paths.clear()
             self.dataset_info_label.setText("目录不存在")
             self._log(f"目录不存在: {project.directory}", "error")
             return
 
-        try:
-            mtime = Path(project.directory).stat().st_mtime_ns
-        except OSError:
-            mtime = -1
-
-        cached = self._scan_cache.get(project.id)
-        if cached and cached[0] == mtime:
-            self._image_paths = list(cached[1])
-            self.dataset_info_label.setText(
-                f"已加载 {len(self._image_paths)} 张图片（缓存）"
-            )
-            return
+        if not project.is_archive_root:
+            try:
+                mtime = Path(project.directory).stat().st_mtime_ns
+            except OSError:
+                mtime = -1
+            cached = self._scan_cache.get(project.id)
+            if cached and cached[0] == mtime:
+                self._image_paths = list(cached[1])
+                self.dataset_info_label.setText(
+                    f"已加载 {len(self._image_paths)} 张图片（缓存）"
+                )
+                return
 
         if self._scan_worker and self._scan_worker.isRunning():
             self._scan_worker.cancel()
 
         self.dataset_info_label.setText("正在扫描图片...")
-        self._scan_worker = _ImageScanWorker(project.id, project.directory)
+        if project.is_archive_root:
+            self._scan_worker = _ImageScanWorker(
+                project.id, directories=dirs)
+        else:
+            self._scan_worker = _ImageScanWorker(
+                project.id, project.directory)
         self._scan_worker.finished.connect(self._on_scan_finished)
         self._scan_worker.start()
 

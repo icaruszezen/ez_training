@@ -407,7 +407,7 @@ class DataPrepPage(QWidget):
         self.dataset_combo.clear()
         self._project_ids.clear()
 
-        projects = self._project_manager.get_all_projects()
+        projects = self._project_manager.get_all_projects(exclude_archived=True)
         for proj in projects:
             self.dataset_combo.addItem(f"{proj.name} ({proj.image_count} 张)")
             self._project_ids.append(proj.id)
@@ -443,9 +443,15 @@ class DataPrepPage(QWidget):
         project = self._project_manager.get_project(project_id)
         if not project:
             return
-        self.dataset_info_label.setText(
-            f"项目: {project.name}\n目录: {project.directory}\n记录图片数: {project.image_count}"
-        )
+        if project.is_archive_root:
+            dirs = self._project_manager.get_archive_directories(project.archive_id)
+            self.dataset_info_label.setText(
+                f"归档: {project.name}\n包含 {len(dirs)} 个目录\n记录图片数: {project.image_count}"
+            )
+        else:
+            self.dataset_info_label.setText(
+                f"项目: {project.name}\n目录: {project.directory}\n记录图片数: {project.image_count}"
+            )
 
     def _update_ratio_hint(self):
         train = self.train_ratio_spin.value()
@@ -676,10 +682,12 @@ class DataPrepPage(QWidget):
             )
             return
 
-        if not os.path.isdir(project.directory):
+        dirs = self._project_manager.get_directories(self._current_project_id)
+        if not dirs:
             InfoBar.error(
                 title="错误",
-                content=f"数据集目录不存在: {project.directory}",
+                content=f"数据集目录不存在: {project.directory}" if not project.is_archive_root
+                        else "归档内没有有效目录",
                 parent=self.window(),
                 position=InfoBarPosition.TOP,
             )
@@ -726,7 +734,7 @@ class DataPrepPage(QWidget):
 
         config = DataPrepConfig(
             dataset_name=project.name,
-            dataset_dir=project.directory,
+            dataset_dir=dirs[0] if dirs else "",
             output_dir=output_dir,
             train_ratio=self.train_ratio_spin.value() / 100.0,
             random_seed=self.seed_spin.value(),
@@ -736,6 +744,7 @@ class DataPrepPage(QWidget):
             skip_unlabeled=self.skip_unlabeled_cb.isChecked(),
             overwrite_output=self.overwrite_cb.isChecked(),
             custom_classes_file=custom_classes_file,
+            dataset_dirs=dirs if len(dirs) > 1 else [],
         )
 
         self._worker = DataPrepWorker(config)
