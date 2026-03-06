@@ -160,6 +160,10 @@ class DownloadWorker(QThread):
                 shutil.rmtree(extract_dir, ignore_errors=True)
 
             with zipfile.ZipFile(tmp_zip, "r") as zf:
+                for member in zf.namelist():
+                    member_path = os.path.realpath(os.path.join(extract_dir, member))
+                    if not member_path.startswith(os.path.realpath(extract_dir) + os.sep) and member_path != os.path.realpath(extract_dir):
+                        raise ValueError(f"Zip 包含非法路径: {member}")
                 zf.extractall(extract_dir)
 
             os.remove(tmp_zip)

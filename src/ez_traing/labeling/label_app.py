@@ -8,7 +8,7 @@ from functools import partial
 from pathlib import Path
 
 from PyQt5.QtGui import QColor, QCursor, QImage, QImageReader, QPixmap
-from PyQt5.QtCore import Qt, QByteArray, QFileInfo, QPoint, QPointF, QProcess, QSize, QTimer, QVariant
+from PyQt5.QtCore import Qt, QByteArray, QFileInfo, QPoint, QPointF, QSize, QTimer, QVariant
 from PyQt5.QtWidgets import (
     QAction, QApplication, QCheckBox, QDockWidget, QFileDialog, QFrame,
     QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMainWindow,
@@ -94,13 +94,14 @@ class MainWindow(QMainWindow, WindowMixin):
         self._beginner = True
         self.screencast = "https://youtu.be/p0nR2YsCY_U"
 
+        if default_prefdef_class_file is None:
+            default_prefdef_class_file = str(_LABELING_ROOT / "data" / "predefined_classes.txt")
         self.load_predefined_classes(default_prefdef_class_file)
 
         if self.label_hist:
             self.default_label = self.label_hist[0]
         else:
             self.default_label = ""
-            print("Not find:/data/predefined_classes.txt (optional)")
 
         self.label_dialog = LabelDialog(parent=self, list_item=self.label_hist)
 
@@ -673,7 +674,6 @@ class MainWindow(QMainWindow, WindowMixin):
     def toggle_drawing_sensitive(self, drawing=True):
         self.actions.editMode.setEnabled(not drawing)
         if not drawing and self.beginner():
-            print('Cancel creation.')
             self.canvas.set_editing(True)
             self.canvas.restore_cursor()
             self.actions.create.setEnabled(True)
@@ -745,18 +745,19 @@ class MainWindow(QMainWindow, WindowMixin):
         item = self.current_item()
         if not item:
             item = self.label_list.item(self.label_list.count() - 1)
+        if not item:
+            return
         difficult = self.diffc_button.isChecked()
-        try:
-            shape = self.items_to_shapes[item]
-        except Exception:
-            pass
+        shape = self.items_to_shapes.get(item)
+        if shape is None:
+            return
         try:
             if difficult != shape.difficult:
                 shape.difficult = difficult
                 self.set_dirty()
             else:
                 self.canvas.set_shape_visible(shape, item.checkState() == Qt.Checked)
-        except Exception:
+        except AttributeError:
             pass
 
     def shape_selection_changed(self, selected=False):
@@ -863,7 +864,7 @@ class MainWindow(QMainWindow, WindowMixin):
             else:
                 self.label_file.save(annotation_file_path, shapes, self.file_path, self.image_data,
                                      self.line_color.getRgb(), self.fill_color.getRgb())
-            print('Image:{0} -> Annotation:{1}'.format(self.file_path, annotation_file_path))
+            
             return True
         except LabelFileError as e:
             self.error_message(u'Error saving label data', u'<b>%s</b>' % e)
@@ -895,7 +896,9 @@ class MainWindow(QMainWindow, WindowMixin):
             self.diffc_button.setChecked(shape.difficult)
 
     def label_item_changed(self, item):
-        shape = self.items_to_shapes[item]
+        shape = self.items_to_shapes.get(item)
+        if shape is None:
+            return
         label = item.text()
         if label != shape.label:
             shape.label = item.text()
@@ -1166,14 +1169,20 @@ class MainWindow(QMainWindow, WindowMixin):
         e = 2.0
         w1 = self.centralWidget().width() - e
         h1 = self.centralWidget().height() - e
+        if not self.canvas.pixmap or h1 <= 0:
+            return 1.0
         a1 = w1 / h1
-        w2 = self.canvas.pixmap.width() - 0.0
-        h2 = self.canvas.pixmap.height() - 0.0
+        w2 = self.canvas.pixmap.width()
+        h2 = self.canvas.pixmap.height()
+        if w2 <= 0 or h2 <= 0:
+            return 1.0
         a2 = w2 / h2
         return w1 / w2 if a2 >= a1 else h1 / h2
 
     def scale_fit_width(self):
         w = self.centralWidget().width() - 2.0
+        if not self.canvas.pixmap or self.canvas.pixmap.width() <= 0:
+            return 1.0
         return w / self.canvas.pixmap.width()
 
     def closeEvent(self, event):
@@ -1368,10 +1377,11 @@ class MainWindow(QMainWindow, WindowMixin):
             self.load_file(filename)
 
     def save_file(self, _value=False):
+        if not self.file_path:
+            return
         if self.default_save_dir is not None and len(ustr(self.default_save_dir)):
-            if self.file_path:
-                saved_path = self._preferred_save_base_path(self.file_path)
-                self._save_file(saved_path)
+            saved_path = self._preferred_save_base_path(self.file_path)
+            self._save_file(saved_path)
         else:
             image_file_dir = os.path.dirname(self.file_path)
             image_file_name = os.path.basename(self.file_path)
@@ -1434,8 +1444,6 @@ class MainWindow(QMainWindow, WindowMixin):
     def reset_all(self):
         self.settings.reset()
         self.close()
-        process = QProcess()
-        process.startDetached(os.path.abspath(__file__))
 
     def may_continue(self):
         if not self.dirty:
@@ -1535,7 +1543,6 @@ class MainWindow(QMainWindow, WindowMixin):
         self.set_format(FORMAT_YOLO)
         t_yolo_parse_reader = YoloReader(txt_path, self.image)
         shapes = t_yolo_parse_reader.get_shapes()
-        print(shapes)
         self.load_labels(shapes)
         self.canvas.verified = t_yolo_parse_reader.verified
 
@@ -1551,6 +1558,8 @@ class MainWindow(QMainWindow, WindowMixin):
         self.canvas.verified = create_ml_parse_reader.verified
 
     def copy_previous_bounding_boxes(self):
+        if not self.file_path or self.file_path not in self.m_img_list:
+            return
         current_index = self.m_img_list.index(self.file_path)
         if current_index - 1 >= 0:
             prev_file_path = self.m_img_list[current_index - 1]

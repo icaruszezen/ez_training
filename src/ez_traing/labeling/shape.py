@@ -92,7 +92,8 @@ class Shape(object):
 
             painter.drawPath(line_path)
             painter.drawPath(vertex_path)
-            painter.fillPath(vertex_path, self.vertex_fill_color)
+            vertex_color = getattr(self, '_current_vertex_color', Shape.vertex_fill_color)
+            painter.fillPath(vertex_path, vertex_color)
 
             if self.paint_label:
                 min_x = sys.maxsize
@@ -124,9 +125,10 @@ class Shape(object):
             size, shape = self._highlight_settings[self._highlight_mode]
             d *= size
         if self._highlight_index is not None:
-            self.vertex_fill_color = self.h_vertex_fill_color
+            current_vertex_color = self.h_vertex_fill_color
         else:
-            self.vertex_fill_color = Shape.vertex_fill_color
+            current_vertex_color = Shape.vertex_fill_color
+        self._current_vertex_color = current_vertex_color
         if shape == self.P_SQUARE:
             path.addRect(point.x() - d / 2, point.y() - d / 2, d, d)
         elif shape == self.P_ROUND:

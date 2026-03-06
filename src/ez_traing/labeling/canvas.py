@@ -1,4 +1,4 @@
-from PyQt5.QtGui import QColor, QPixmap, QPainter, QCursor
+from PyQt5.QtGui import QBrush, QColor, QPixmap, QPainter, QCursor
 from PyQt5.QtCore import Qt, QPointF, QPoint, pyqtSignal
 from PyQt5.QtWidgets import QWidget, QApplication, QMenu
 
@@ -94,21 +94,30 @@ class Canvas(QWidget):
     def selected_vertex(self):
         return self.h_vertex is not None
 
+    def _label_coordinates(self):
+        """Safely resolve the label_coordinates widget from the parent window."""
+        try:
+            return self.parent().window().label_coordinates
+        except AttributeError:
+            return None
+
+    def _set_coordinates_text(self, text: str):
+        lc = self._label_coordinates()
+        if lc is not None:
+            lc.setText(text)
+
     def mouseMoveEvent(self, ev):
         """Update line with last point and current coordinates."""
         pos = self.transform_pos(ev.pos())
 
-        window = self.parent().window()
-        if window.file_path is not None:
-            self.parent().window().label_coordinates.setText(
-                'X: %d; Y: %d' % (pos.x(), pos.y()))
+        self._set_coordinates_text('X: %d; Y: %d' % (pos.x(), pos.y()))
 
         if self.drawing():
             self.override_cursor(CURSOR_DRAW)
             if self.current:
                 current_width = abs(self.current[0].x() - pos.x())
                 current_height = abs(self.current[0].y() - pos.y())
-                self.parent().window().label_coordinates.setText(
+                self._set_coordinates_text(
                     'Width: %d, Height: %d / X: %d; Y: %d' % (current_width, current_height, pos.x(), pos.y()))
 
                 color = self.drawing_line_color
@@ -158,24 +167,26 @@ class Canvas(QWidget):
                 self.shapeMoved.emit()
                 self.repaint()
 
-                point1 = self.h_shape[1]
-                point3 = self.h_shape[3]
-                current_width = abs(point1.x() - point3.x())
-                current_height = abs(point1.y() - point3.y())
-                self.parent().window().label_coordinates.setText(
-                    'Width: %d, Height: %d / X: %d; Y: %d' % (current_width, current_height, pos.x(), pos.y()))
+                if len(self.h_shape) >= 4:
+                    point1 = self.h_shape[1]
+                    point3 = self.h_shape[3]
+                    current_width = abs(point1.x() - point3.x())
+                    current_height = abs(point1.y() - point3.y())
+                    self._set_coordinates_text(
+                        'Width: %d, Height: %d / X: %d; Y: %d' % (current_width, current_height, pos.x(), pos.y()))
             elif self.selected_shape and self.prev_point:
                 self.override_cursor(CURSOR_MOVE)
                 self.bounded_move_shape(self.selected_shape, pos)
                 self.shapeMoved.emit()
                 self.repaint()
 
-                point1 = self.selected_shape[1]
-                point3 = self.selected_shape[3]
-                current_width = abs(point1.x() - point3.x())
-                current_height = abs(point1.y() - point3.y())
-                self.parent().window().label_coordinates.setText(
-                    'Width: %d, Height: %d / X: %d; Y: %d' % (current_width, current_height, pos.x(), pos.y()))
+                if len(self.selected_shape) >= 4:
+                    point1 = self.selected_shape[1]
+                    point3 = self.selected_shape[3]
+                    current_width = abs(point1.x() - point3.x())
+                    current_height = abs(point1.y() - point3.y())
+                    self._set_coordinates_text(
+                        'Width: %d, Height: %d / X: %d; Y: %d' % (current_width, current_height, pos.x(), pos.y()))
             else:
                 delta = ev.pos() - self.pan_initial_pos
                 self.scrollRequest.emit(delta.x(), Qt.Horizontal)
@@ -207,12 +218,13 @@ class Canvas(QWidget):
                 self.override_cursor(CURSOR_GRAB)
                 self.update()
 
-                point1 = self.h_shape[1]
-                point3 = self.h_shape[3]
-                current_width = abs(point1.x() - point3.x())
-                current_height = abs(point1.y() - point3.y())
-                self.parent().window().label_coordinates.setText(
-                    'Width: %d, Height: %d / X: %d; Y: %d' % (current_width, current_height, pos.x(), pos.y()))
+                if len(self.h_shape) >= 4:
+                    point1 = self.h_shape[1]
+                    point3 = self.h_shape[3]
+                    current_width = abs(point1.x() - point3.x())
+                    current_height = abs(point1.y() - point3.y())
+                    self._set_coordinates_text(
+                        'Width: %d, Height: %d / X: %d; Y: %d' % (current_width, current_height, pos.x(), pos.y()))
                 break
         else:
             if self.h_shape:
@@ -483,9 +495,7 @@ class Canvas(QWidget):
             rect_width = right_bottom.x() - left_top.x()
             rect_height = right_bottom.y() - left_top.y()
             p.setPen(self.drawing_rect_color)
-            from PyQt5.QtCore import Qt as _Qt
-            from PyQt5.QtGui import QBrush
-            brush = QBrush(_Qt.BDiagPattern)
+            brush = QBrush(Qt.BDiagPattern)
             p.setBrush(brush)
             p.drawRect(int(left_top.x()), int(left_top.y()), int(rect_width), int(rect_height))
 
@@ -567,7 +577,6 @@ class Canvas(QWidget):
     def keyPressEvent(self, ev):
         key = ev.key()
         if key == Qt.Key_Escape and self.current:
-            print('ESC press')
             self.current = None
             self.drawingPolygon.emit(False)
             self.update()
@@ -583,26 +592,17 @@ class Canvas(QWidget):
             self.move_one_pixel('Down')
 
     def move_one_pixel(self, direction):
-        if direction == 'Left' and not self.move_out_of_bound(QPointF(-1.0, 0)):
-            self.selected_shape.points[0] += QPointF(-1.0, 0)
-            self.selected_shape.points[1] += QPointF(-1.0, 0)
-            self.selected_shape.points[2] += QPointF(-1.0, 0)
-            self.selected_shape.points[3] += QPointF(-1.0, 0)
-        elif direction == 'Right' and not self.move_out_of_bound(QPointF(1.0, 0)):
-            self.selected_shape.points[0] += QPointF(1.0, 0)
-            self.selected_shape.points[1] += QPointF(1.0, 0)
-            self.selected_shape.points[2] += QPointF(1.0, 0)
-            self.selected_shape.points[3] += QPointF(1.0, 0)
-        elif direction == 'Up' and not self.move_out_of_bound(QPointF(0, -1.0)):
-            self.selected_shape.points[0] += QPointF(0, -1.0)
-            self.selected_shape.points[1] += QPointF(0, -1.0)
-            self.selected_shape.points[2] += QPointF(0, -1.0)
-            self.selected_shape.points[3] += QPointF(0, -1.0)
-        elif direction == 'Down' and not self.move_out_of_bound(QPointF(0, 1.0)):
-            self.selected_shape.points[0] += QPointF(0, 1.0)
-            self.selected_shape.points[1] += QPointF(0, 1.0)
-            self.selected_shape.points[2] += QPointF(0, 1.0)
-            self.selected_shape.points[3] += QPointF(0, 1.0)
+        offsets = {
+            'Left': QPointF(-1.0, 0),
+            'Right': QPointF(1.0, 0),
+            'Up': QPointF(0, -1.0),
+            'Down': QPointF(0, 1.0),
+        }
+        step = offsets.get(direction)
+        if step is None or self.move_out_of_bound(step):
+            return
+        for i in range(len(self.selected_shape.points)):
+            self.selected_shape.points[i] += step
         self.shapeMoved.emit()
         self.repaint()
 
@@ -671,7 +671,7 @@ class Canvas(QWidget):
         self.un_highlight()
         self.selected_shape_copy = None
         self.restore_cursor()
-        self.pixmap = None
+        self.pixmap = QPixmap()
         self.update()
 
     def set_drawing_shape_to_square(self, status):
