@@ -1515,14 +1515,19 @@ class MainWindow(QMainWindow, WindowMixin):
         self.set_dirty()
 
     def load_predefined_classes(self, predef_classes_file):
-        if predef_classes_file and os.path.exists(predef_classes_file) is True:
-            with codecs.open(predef_classes_file, 'r', 'utf8') as f:
-                for line in f:
-                    line = line.strip()
-                    if self.label_hist is None:
-                        self.label_hist = [line]
-                    else:
-                        self.label_hist.append(line)
+        if not predef_classes_file:
+            return
+        if not os.path.exists(predef_classes_file):
+            os.makedirs(os.path.dirname(predef_classes_file), exist_ok=True)
+            open(predef_classes_file, 'w').close()
+            return
+        with codecs.open(predef_classes_file, 'r', 'utf8') as f:
+            for line in f:
+                line = line.strip()
+                if self.label_hist is None:
+                    self.label_hist = [line]
+                else:
+                    self.label_hist.append(line)
 
     def load_pascal_xml_by_filename(self, xml_path):
         if self.file_path is None:

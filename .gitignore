@@ -140,3 +140,6 @@ ez_traing.rar
 
 .kiro
 .kiro/*
+
+# User-specific predefined label classes
+src/ez_traing/labeling/data/predefined_classes.txt
