@@ -143,3 +143,7 @@ ez_traing.rar
 
 # User-specific predefined label classes
 src/ez_traing/labeling/data/predefined_classes.txt
+
+# User-created annotation scripts (managed via UI)
+src/ez_traing/annotation_scripts/*.py
+!src/ez_traing/annotation_scripts/__init__.py
