@@ -117,9 +117,11 @@ class TemplateMatcher:
         缩放搜索步数。
     """
 
+    _SQDIFF_DEFAULT_THRESHOLD = 0.2
+
     def __init__(
         self,
-        threshold: float = 0.8,
+        threshold: Optional[float] = None,
         max_candidates: int = 50,
         nms_iou_threshold: float = 0.3,
         method: int = cv2.TM_CCOEFF_NORMED,
@@ -127,6 +129,9 @@ class TemplateMatcher:
         scale_range: Tuple[float, float] = (0.5, 1.5),
         scale_steps: int = 10,
     ):
+        if threshold is None:
+            threshold = (self._SQDIFF_DEFAULT_THRESHOLD
+                         if method in _SQDIFF_METHODS else 0.8)
         self.threshold = threshold
         self.max_candidates = max_candidates
         self.nms_iou_threshold = nms_iou_threshold
@@ -257,12 +262,33 @@ class TemplateMatcher:
     # Single-image matching
     # ------------------------------------------------------------------
 
+    def preprocess_templates(
+        self, templates: List[TemplateInfo]
+    ) -> Dict[int, np.ndarray]:
+        """预处理所有模板图像并返回缓存字典（id(tpl) -> processed_image）。
+
+        在批量匹配场景中调用一次，然后传入 match() 避免重复预处理。
+        """
+        cache: Dict[int, np.ndarray] = {}
+        for tpl in templates:
+            if tpl.image is None:
+                continue
+            cache[id(tpl)] = self.preprocess_image(tpl.image, tpl.preprocess)
+        return cache
+
     def match(
         self,
         target_path: str,
         templates: List[TemplateInfo],
+        _preprocessed_templates: Optional[Dict[int, np.ndarray]] = None,
     ) -> MatchResult:
-        """对单张目标图执行多模板匹配。"""
+        """对单张目标图执行多模板匹配。
+
+        Parameters
+        ----------
+        _preprocessed_templates : dict, optional
+            由 preprocess_templates() 返回的预处理缓存，避免重复计算。
+        """
         target = imread_unicode(target_path, cv2.IMREAD_COLOR)
         if target is None:
             return MatchResult(
@@ -287,7 +313,10 @@ class TemplateMatcher:
                 processed_target = self.preprocess_image(
                     search_region, tpl.preprocess
                 )
-                processed_tpl = self.preprocess_image(tpl.image, tpl.preprocess)
+                if _preprocessed_templates and id(tpl) in _preprocessed_templates:
+                    processed_tpl = _preprocessed_templates[id(tpl)]
+                else:
+                    processed_tpl = self.preprocess_image(tpl.image, tpl.preprocess)
 
                 if self.multi_scale:
                     boxes = self._match_multi_scale(
@@ -350,7 +379,10 @@ class TemplateMatcher:
     ) -> List[BoundingBox]:
         boxes: List[BoundingBox] = []
         lo, hi = self.scale_range
-        for scale in np.linspace(lo, hi, self.scale_steps):
+        scales = np.linspace(lo, hi, self.scale_steps)
+        if not np.any(np.isclose(scales, 1.0)):
+            scales = np.sort(np.append(scales, 1.0))
+        for scale in scales:
             new_w = max(1, int(tpl_image.shape[1] * scale))
             new_h = max(1, int(tpl_image.shape[0] * scale))
             if new_h > target.shape[0] or new_w > target.shape[1]:

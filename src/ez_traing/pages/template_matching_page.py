@@ -4,12 +4,14 @@ import json
 import logging
 import os
 import re
+from collections import OrderedDict
 from datetime import datetime
 from pathlib import Path
 from time import perf_counter
 from typing import Any, Dict, List, Optional, Tuple
 
 import cv2
+import numpy as np
 from PyQt5.QtCore import QPoint, QRect, QSize, Qt, QThread, QTimer, pyqtSignal
 from PyQt5.QtGui import QBrush, QColor, QFont, QIcon, QImage, QPainter, QPen, QPixmap, QTextCursor
 from PyQt5.QtWidgets import (
@@ -499,6 +501,8 @@ class TemplateMatchingPage(QWidget):
         self._log_flush_timer.timeout.connect(self._flush_log_buffer)
 
         self._voc_writer = VOCAnnotationWriter()
+        self._image_cache: OrderedDict[str, "np.ndarray"] = OrderedDict()
+        self._IMAGE_CACHE_MAX = 8
 
         self._setup_ui()
 
@@ -1073,7 +1077,8 @@ class TemplateMatchingPage(QWidget):
             if info.image is not None:
                 ok, buf = cv2.imencode(".png", info.image)
                 if ok:
-                    buf.tofile(str(img_path))
+                    with open(img_path, "wb") as f:
+                        f.write(buf.tobytes())
                 else:
                     self._log(f"编码模板图像失败: {info.label}", "error")
                     continue
@@ -1214,6 +1219,7 @@ class TemplateMatchingPage(QWidget):
         self._check_states.clear()
         self._unmatched_paths.clear()
         self._manual_box_keys.clear()
+        self._image_cache.clear()
         self._result_image_list.clear()
         self._box_table.setRowCount(0)
         self._preview_label.clear()
@@ -1378,13 +1384,29 @@ class TemplateMatchingPage(QWidget):
 
     def _on_box_check_changed(self, image_path: str, idx: int, checked: bool):
         self._check_states[(image_path, idx)] = checked
+        boxes = self._match_results.get(image_path, [])
+        if boxes:
+            self._render_preview(image_path, boxes)
+
+    def _read_image_cached(self, image_path: str) -> Optional[np.ndarray]:
+        if image_path in self._image_cache:
+            self._image_cache.move_to_end(image_path)
+            return self._image_cache[image_path]
+        img = imread_unicode(image_path)
+        if img is None:
+            return None
+        self._image_cache[image_path] = img
+        while len(self._image_cache) > self._IMAGE_CACHE_MAX:
+            self._image_cache.popitem(last=False)
+        return img
 
     def _render_preview(self, image_path: str, boxes: List[BoundingBox]):
         """在预览区绘制带候选框的图片。"""
-        img = imread_unicode(image_path)
-        if img is None:
+        cached = self._read_image_cached(image_path)
+        if cached is None:
             self._preview_label.setText("无法读取图片")
             return
+        img = cached.copy()
 
         h_orig, w_orig = img.shape[:2]
         labels_info: List[Tuple[str, int, int, Tuple[int, int, int]]] = []

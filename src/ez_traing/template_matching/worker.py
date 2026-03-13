@@ -22,6 +22,7 @@ class TemplateMatchingStats:
     empty: int = 0
     failed: int = 0
     skipped: int = 0
+    cancelled: bool = False
 
 
 class TemplateMatchingWorker(QThread):
@@ -60,10 +61,12 @@ class TemplateMatchingWorker(QThread):
 
     def run(self):
         stats = TemplateMatchingStats(total=len(self._image_paths))
+        tpl_cache = self._matcher.preprocess_templates(self._templates)
 
         for i, image_path in enumerate(self._image_paths):
             if self._is_cancelled:
                 logger.info("模板匹配已被用户取消")
+                stats.cancelled = True
                 break
 
             filename = Path(image_path).name
@@ -78,7 +81,9 @@ class TemplateMatchingWorker(QThread):
             self.progress.emit(i + 1, stats.total, f"正在匹配: {filename}")
 
             try:
-                result: MatchResult = self._matcher.match(image_path, self._templates)
+                result: MatchResult = self._matcher.match(
+                    image_path, self._templates, _preprocessed_templates=tpl_cache
+                )
             except Exception as exc:
                 stats.processed += 1
                 stats.failed += 1

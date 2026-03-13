@@ -6,7 +6,7 @@ from typing import List, Optional, Tuple
 
 import cv2
 import numpy as np
-from PyQt5.QtCore import QPoint, QRect, QSize, Qt, pyqtSignal
+from PyQt5.QtCore import QPoint, QRect, QSize, Qt, QThread, pyqtSignal
 from PyQt5.QtGui import QColor, QImage, QPainter, QPen, QPixmap
 from PyQt5.QtWidgets import (
     QDialog,
@@ -34,6 +34,7 @@ from qfluentwidgets import (
 )
 
 from ez_traing.template_matching.matcher import (
+    MatchResult,
     PreprocessConfig,
     TemplateMatcher,
     TemplateInfo,
@@ -187,8 +188,8 @@ class CropImageWidget(QWidget):
         offset, scale = self._compute_layout()
         if scale <= 0:
             return QPoint(0, 0)
-        ix = int((pos.x() - offset.x()) / scale)
-        iy = int((pos.y() - offset.y()) / scale)
+        ix = round((pos.x() - offset.x()) / scale)
+        iy = round((pos.y() - offset.y()) / scale)
         return QPoint(ix, iy)
 
     def _image_rect_to_widget(self, x, y, w, h) -> QRect:
@@ -241,9 +242,9 @@ class CropImageWidget(QWidget):
             full = self._image_rect_to_widget(0, 0, img_w, img_h)
 
             painter.fillRect(QRect(full.left(), full.top(), full.width(), sel.top() - full.top()), overlay)
-            painter.fillRect(QRect(full.left(), sel.bottom(), full.width(), full.bottom() - sel.bottom()), overlay)
+            painter.fillRect(QRect(full.left(), sel.bottom() + 1, full.width(), full.bottom() - sel.bottom()), overlay)
             painter.fillRect(QRect(full.left(), sel.top(), sel.left() - full.left(), sel.height()), overlay)
-            painter.fillRect(QRect(sel.right(), sel.top(), full.right() - sel.right(), sel.height()), overlay)
+            painter.fillRect(QRect(sel.right() + 1, sel.top(), full.right() - sel.right(), sel.height()), overlay)
 
             pen = QPen(QColor(0, 170, 255), 2, Qt.SolidLine)
             painter.setPen(pen)
@@ -456,6 +457,32 @@ class RoiDrawDialog(QDialog):
 
 
 # ======================================================================
+# Test Matching Worker
+# ======================================================================
+
+
+class _TestMatchWorker(QThread):
+    """后台执行模板匹配测试的工作线程。"""
+
+    single_done = pyqtSignal(str, object)  # (path, MatchResult)
+    all_done = pyqtSignal()
+
+    def __init__(self, matcher: TemplateMatcher, tpl_info: TemplateInfo,
+                 paths: List[str], primary_index: int, parent=None):
+        super().__init__(parent)
+        self._matcher = matcher
+        self._tpl_info = tpl_info
+        self._paths = paths
+        self._primary_index = primary_index
+
+    def run(self):
+        for i, path in enumerate(self._paths):
+            result = self._matcher.match(path, [self._tpl_info])
+            self.single_done.emit(path, result)
+        self.all_done.emit()
+
+
+# ======================================================================
 # Template Editor Dialog
 # ======================================================================
 
@@ -473,6 +500,7 @@ class TemplateEditorDialog(QDialog):
         self._image_path = image_path
         self._source_image = imread_unicode(image_path)
         self._test_image_paths: List[str] = []
+        self._test_worker: Optional[_TestMatchWorker] = None
 
         self.setWindowTitle(f"编辑模板 - {Path(image_path).name}")
         self.setMinimumSize(1060, 720)
@@ -555,6 +583,7 @@ class TemplateEditorDialog(QDialog):
         self._pp_blur_ksize.setRange(3, 31)
         self._pp_blur_ksize.setSingleStep(2)
         self._pp_blur_ksize.setValue(5)
+        self._pp_blur_ksize.valueChanged.connect(self._force_odd_blur_ksize)
         self._pp_blur_ksize.valueChanged.connect(self._on_preprocess_changed)
         blur_row.addWidget(self._pp_blur_ksize)
         blur_row.addStretch()
@@ -585,6 +614,7 @@ class TemplateEditorDialog(QDialog):
         self._pp_adaptive_block.setRange(3, 99)
         self._pp_adaptive_block.setSingleStep(2)
         self._pp_adaptive_block.setValue(11)
+        self._pp_adaptive_block.valueChanged.connect(self._force_odd_adaptive_block)
         self._pp_adaptive_block.valueChanged.connect(self._on_preprocess_changed)
         adapt_row.addWidget(self._pp_adaptive_block)
         adapt_row.addWidget(CaptionLabel("C:"))
@@ -633,7 +663,7 @@ class TemplateEditorDialog(QDialog):
         ]:
             roi_row.addWidget(CaptionLabel(lbl_text))
             sb = SpinBox()
-            sb.setRange(0, 9999)
+            sb.setRange(0, 99999)
             sb.setValue(0)
             sb.valueChanged.connect(self._on_preprocess_changed)
             setattr(self, attr_name, sb)
@@ -791,6 +821,18 @@ class TemplateEditorDialog(QDialog):
     # Preprocessing preview (displayed in the crop widget)
     # ------------------------------------------------------------------
 
+    def _force_odd_blur_ksize(self, value: int):
+        if value % 2 == 0:
+            self._pp_blur_ksize.blockSignals(True)
+            self._pp_blur_ksize.setValue(value + 1)
+            self._pp_blur_ksize.blockSignals(False)
+
+    def _force_odd_adaptive_block(self, value: int):
+        if value % 2 == 0:
+            self._pp_adaptive_block.blockSignals(True)
+            self._pp_adaptive_block.setValue(value + 1)
+            self._pp_adaptive_block.blockSignals(False)
+
     def _on_preprocess_changed(self):
         self._update_crop_display()
 
@@ -914,12 +956,14 @@ class TemplateEditorDialog(QDialog):
             self._test_result_label.setText("请先添加测试图片")
             return
 
+        if self._test_worker and self._test_worker.isRunning():
+            return
+
         row = self._test_list.currentRow()
         if row < 0:
             row = 0
             self._test_list.setCurrentRow(0)
 
-        test_path = self._test_image_paths[row]
         label = self.get_label()
         config = self.get_preprocess_config()
 
@@ -931,33 +975,43 @@ class TemplateEditorDialog(QDialog):
             max_candidates=50,
             multi_scale=False,
         )
-        result = matcher.match(test_path, [tpl_info])
 
-        self._show_test_image(test_path, result.boxes)
+        self._test_result_label.setText("正在测试...")
+        self._test_primary_row = row
 
-        if result.boxes:
-            self._test_result_label.setText(
-                f"找到 {len(result.boxes)} 个匹配  "
-                f"(最高置信度: {max(b.confidence for b in result.boxes):.3f})"
-            )
-        else:
-            self._test_result_label.setText("未找到匹配")
+        self._test_worker = _TestMatchWorker(
+            matcher, tpl_info, list(self._test_image_paths), row, self
+        )
+        self._test_worker.single_done.connect(self._on_test_single_done)
+        self._test_worker.all_done.connect(self._on_test_all_done)
+        self._test_worker.start()
 
-        self._update_test_list_results(matcher, tpl_info)
+    def _on_test_single_done(self, path: str, result: MatchResult):
+        try:
+            idx = self._test_image_paths.index(path)
+        except ValueError:
+            return
 
-    def _update_test_list_results(
-        self, matcher: TemplateMatcher, tpl_info: TemplateInfo
-    ):
-        for i, path in enumerate(self._test_image_paths):
-            item = self._test_list.item(i)
-            if item is None:
-                continue
-            if i == self._test_list.currentRow():
-                continue
-            result = matcher.match(path, [tpl_info])
-            n = len(result.boxes)
-            name = Path(path).name
-            item.setText(f"{name}  ({n} 个匹配)" if n else name)
+        item = self._test_list.item(idx)
+        if item is None:
+            return
+
+        n = len(result.boxes)
+        name = Path(path).name
+        item.setText(f"{name}  ({n} 个匹配)" if n else name)
+
+        if idx == self._test_primary_row:
+            self._show_test_image(path, result.boxes)
+            if result.boxes:
+                self._test_result_label.setText(
+                    f"找到 {len(result.boxes)} 个匹配  "
+                    f"(最高置信度: {max(b.confidence for b in result.boxes):.3f})"
+                )
+            else:
+                self._test_result_label.setText("未找到匹配")
+
+    def _on_test_all_done(self):
+        self._test_worker = None
 
     def _show_test_image(self, path: str, boxes):
         img = imread_unicode(path)
