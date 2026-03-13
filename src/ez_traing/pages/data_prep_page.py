@@ -32,7 +32,7 @@ from qfluentwidgets import (
 )
 
 from ez_traing.common.constants import open_path
-from ez_traing.data_prep.augmentation import get_augmentation_specs
+from ez_traing.data_prep.augmentation import get_augmentation_specs, is_albumentations_available
 from ez_traing.data_prep.models import DataPrepConfig, DataPrepSummary
 from ez_traing.data_prep.pipeline import DataPrepPipeline
 
@@ -118,6 +118,10 @@ class DataPrepPage(QWidget):
         self._log_timer.timeout.connect(self._flush_log_buffer)
         self._ui_state_path = Path.home() / ".ez_traing" / self._STATE_FILE
         self._restoring_ui_state = False
+        self._save_state_timer = QTimer(self)
+        self._save_state_timer.setSingleShot(True)
+        self._save_state_timer.setInterval(300)
+        self._save_state_timer.timeout.connect(self._do_save_ui_state)
         self._setup_ui()
         self._bind_persistence_signals()
         self._load_ui_state()
@@ -614,6 +618,9 @@ class DataPrepPage(QWidget):
     def _save_ui_state(self) -> None:
         if self._restoring_ui_state:
             return
+        self._save_state_timer.start()
+
+    def _do_save_ui_state(self) -> None:
         state = {
             "project_id": self._current_project_id,
             "train_ratio": self.train_ratio_spin.value(),
@@ -715,6 +722,15 @@ class DataPrepPage(QWidget):
                     content="已启用增强，请至少选择一种增强方法",
                     parent=self.window(),
                     position=InfoBarPosition.TOP,
+                )
+                return
+            if not is_albumentations_available():
+                InfoBar.error(
+                    title="依赖缺失",
+                    content="未安装 albumentations 库，无法进行数据增强。请先运行 pip install albumentations",
+                    parent=self.window(),
+                    position=InfoBarPosition.TOP,
+                    duration=5000,
                 )
                 return
             augment_times = self.aug_count_spin.value()

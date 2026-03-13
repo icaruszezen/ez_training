@@ -13,9 +13,9 @@ def _normalize_base_stem(stem: str) -> str:
     """提取同源样本主干名，降低增强/拷贝变体被分到不同集合的风险。"""
     value = stem.lower().strip()
 
-    # 常见增强后缀：xxx_aug1 / xxx_flip / xxx_rot90 / xxx_noise2 ...
+    # 常见增强/拷贝后缀：xxx_aug1 / xxx_flip / xxx_rot90 / xxx_noise2 ...
     suffix_patterns = [
-        r"([_\-](aug|copy|dup|flip|flipped|mirror|rot|rotate|noise|blur|crop|resize|color|bright|contrast|gamma|hsv|clahe|persp|affine|shift|trans)\d*)+$",
+        r"([_\-](aug|copy|dup|flip|flipped|mirror|rot|rotate|noise|blur|crop|resize|color|bright|contrast|gamma|hsv|clahe|persp|affine|shift|trans|scale|scaled|cutout|mosaic|mixup|elastic|distort|jitter|sharpen|shear|zoom|pad|padded)\d*)+$",
         r"([_\-](v|ver|version)\d+)+$",
     ]
     for pattern in suffix_patterns:
@@ -36,7 +36,7 @@ def _leakage_group_key(
     多根时添加根索引前缀以区分不同来源。
     """
     path: Path = sample.image_path
-    parent: str = path.parent.name.lower()
+    parent: str = str(path.parent).lower()
     if dataset_roots:
         for idx, root in enumerate(dataset_roots):
             try:
@@ -65,8 +65,12 @@ def split_train_val(
 
     grouped_items = list(groups.items())
     if len(grouped_items) < 2:
+        only_key = grouped_items[0][0] if grouped_items else "N/A"
+        count = len(samples)
         raise ValueError(
-            "可用于无泄露划分的同源分组不足 2 组，请增加数据或调整样本命名后重试。"
+            f"可用于无泄露划分的同源分组不足 2 组（共 {count} 个样本归入 1 个组: "
+            f"'{only_key}'）。所有样本的文件名可能具有相同的主干名（如均为同一图片的增强变体）。"
+            f"请增加不同来源的图片或调整样本命名后重试。"
         )
 
     rnd = random.Random(seed)

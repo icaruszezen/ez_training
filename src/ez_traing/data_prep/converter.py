@@ -1,17 +1,25 @@
 """VOC 与 YOLO 标注转换工具。"""
 
+import logging
+import threading
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
 from ez_traing.data_prep.models import AnnotationBox, DatasetSample
 
+logger = logging.getLogger(__name__)
+
 _VOC_RAW_CACHE: Dict[Tuple[str, int], List[Tuple[str, float, float, float, float]]] = {}
+_VOC_CACHE_LOCK = threading.Lock()
+_VOC_PATH_MTIME: Dict[str, int] = {}
 
 
 def clear_voc_cache() -> None:
     """清空 VOC XML 解析缓存，在管线结束后调用以释放内存。"""
-    _VOC_RAW_CACHE.clear()
+    with _VOC_CACHE_LOCK:
+        _VOC_RAW_CACHE.clear()
+        _VOC_PATH_MTIME.clear()
 
 
 def load_existing_classes(dataset_root: Path) -> List[str]:
@@ -32,17 +40,41 @@ def save_classes(classes_path: Path, class_names: List[str]) -> None:
             f.write(f"{name}\n")
 
 
-def find_voc_for_image(image_path: Path, dataset_root: Path) -> Optional[Path]:
-    """为图片定位 VOC 标注文件。"""
+def find_voc_for_image(
+    image_path: Path,
+    dataset_root: Path,
+    seen_xml_map: Optional[Dict[str, Path]] = None,
+) -> Optional[Path]:
+    """为图片定位 VOC 标注文件。
+
+    *seen_xml_map* 用于检测同名不同格式图片共享同一 XML 的歧义。
+    调用方可传入一个在扫描过程中持续积累的 ``{xml_path_str: first_image_path}`` 字典。
+    """
     candidate = image_path.with_suffix(".xml")
     if candidate.exists():
-        return candidate
+        xml_path = candidate
+    else:
+        alt = dataset_root / "Annotations" / f"{image_path.stem}.xml"
+        if alt.exists():
+            xml_path = alt
+        else:
+            return None
 
-    alt = dataset_root / "Annotations" / f"{image_path.stem}.xml"
-    if alt.exists():
-        return alt
+    if seen_xml_map is not None:
+        xml_key = str(xml_path)
+        first = seen_xml_map.get(xml_key)
+        if first is not None and first != image_path:
+            logger.warning(
+                "同名标注歧义: %s 和 %s 共享标注文件 %s，"
+                "尺寸不同可能导致坐标偏移",
+                first.name,
+                image_path.name,
+                xml_path.name,
+            )
+        else:
+            seen_xml_map[xml_key] = image_path
 
-    return None
+    return xml_path
 
 
 def read_voc_image_size(xml_path: Path) -> Optional[Tuple[int, int]]:
@@ -72,15 +104,13 @@ def parse_voc_boxes(xml_path: Path, image_width: int, image_height: int) -> List
     except OSError as e:
         raise ValueError(f"读取 XML 失败: {xml_path} ({e})") from e
 
-    cache_key = (str(xml_path), mtime_ns)
-    cached_raw = _VOC_RAW_CACHE.get(cache_key)
+    path_str = str(xml_path)
+    cache_key = (path_str, mtime_ns)
+
+    with _VOC_CACHE_LOCK:
+        cached_raw = _VOC_RAW_CACHE.get(cache_key)
 
     if cached_raw is None:
-        # 删除该路径旧版本缓存，避免缓存无限增长。
-        stale_keys = [k for k in _VOC_RAW_CACHE.keys() if k[0] == str(xml_path) and k != cache_key]
-        for key in stale_keys:
-            _VOC_RAW_CACHE.pop(key, None)
-
         raw_boxes: List[Tuple[str, float, float, float, float]] = []
         try:
             root = ET.parse(xml_path).getroot()
@@ -102,7 +132,12 @@ def parse_voc_boxes(xml_path: Path, image_width: int, image_height: int) -> List
                 continue
             raw_boxes.append((label, x_min, y_min, x_max, y_max))
 
-        _VOC_RAW_CACHE[cache_key] = raw_boxes
+        with _VOC_CACHE_LOCK:
+            old_mtime = _VOC_PATH_MTIME.get(path_str)
+            if old_mtime is not None and old_mtime != mtime_ns:
+                _VOC_RAW_CACHE.pop((path_str, old_mtime), None)
+            _VOC_PATH_MTIME[path_str] = mtime_ns
+            _VOC_RAW_CACHE[cache_key] = raw_boxes
         cached_raw = raw_boxes
 
     boxes: List[AnnotationBox] = []

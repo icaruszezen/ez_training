@@ -34,8 +34,16 @@ AUGMENTATION_SPECS: List[Tuple[str, str]] = [
 ]
 
 
+_GEOMETRIC_METHODS = {"rotate", "shift_scale_rotate", "affine", "perspective", "random_resized_crop"}
+
+
 def get_augmentation_specs() -> List[Tuple[str, str]]:
     return list(AUGMENTATION_SPECS)
+
+
+def is_albumentations_available() -> bool:
+    """检查 albumentations 是否已安装可用。"""
+    return A is not None
 
 
 def _build_transform_map(
@@ -100,6 +108,10 @@ def build_augmenter(
 ):
     """根据方法列表构建增强器。
 
+    几何类变换（rotate / shift_scale_rotate / affine / perspective /
+    random_resized_crop）使用 ``OneOf`` 随机选取一种执行，避免多种几何变换
+    叠加导致图像过度失真。翻转、颜色、模糊、噪声等变换各自独立应用。
+
     Args:
         methods: 增强方法名称列表。
         image_size: ``(height, width)``，用于 RandomResizedCrop 等尺寸相关变换。
@@ -110,12 +122,30 @@ def build_augmenter(
         raise RuntimeError("未安装 albumentations，请先安装依赖")
 
     transform_map = _build_transform_map(image_size=image_size)
-    transforms = [transform_map[m]() for m in methods if m in transform_map]
-    if not transforms:
+
+    geometric_transforms = []
+    other_transforms = []
+    for m in methods:
+        if m not in transform_map:
+            continue
+        t = transform_map[m]()
+        if m in _GEOMETRIC_METHODS:
+            geometric_transforms.append(t)
+        else:
+            other_transforms.append(t)
+
+    final_transforms = list(other_transforms)
+    if geometric_transforms:
+        if len(geometric_transforms) == 1:
+            final_transforms.append(geometric_transforms[0])
+        else:
+            final_transforms.append(A.OneOf(geometric_transforms, p=0.6))
+
+    if not final_transforms:
         return None
 
     return A.Compose(
-        transforms,
+        final_transforms,
         bbox_params=A.BboxParams(
             format="pascal_voc",
             label_fields=["class_labels"],

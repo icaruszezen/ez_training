@@ -63,6 +63,15 @@ class DataPrepPipeline:
             raise ValueError("没有可用的数据集目录")
 
         output_root = Path(self.config.output_dir)
+        resolved_output = output_root.resolve()
+        for dr in dataset_roots:
+            resolved_dr = dr.resolve()
+            if resolved_output == resolved_dr or self._is_subpath(resolved_output, resolved_dr):
+                raise ValueError(
+                    f"输出目录 ({output_root}) 不能与数据集源目录 ({dr}) 相同或是其子目录，"
+                    f"覆盖模式下可能删除源数据。请选择其他输出目录。"
+                )
+
         img_train_dir, img_val_dir, label_train_dir, label_val_dir = self._prepare_output_dirs(
             output_root, self.config.overwrite_output
         )
@@ -101,6 +110,12 @@ class DataPrepPipeline:
                 self._log(
                     log_callback,
                     f"[警告] 以下标签不在自定义类别中，对应标注框将被跳过: {sorted(unknown_labels)}",
+                )
+            all_labels = {box.label for s in samples for box in s.boxes}
+            if all_labels and not (all_labels & class_set):
+                raise ValueError(
+                    f"自定义类别 {class_names} 与数据中的实际标签 {sorted(all_labels)} "
+                    f"完全不匹配，导出将产生全空标注。请检查自定义类别文件。"
                 )
         else:
             merged_existing: List[str] = []
@@ -151,45 +166,54 @@ class DataPrepPipeline:
             classes_count=len(class_names),
         )
 
-        train_export_started_at = perf_counter()
-        summary.train_images, summary.augmented_images, done_steps = self._export_split(
-            split_name="train",
-            samples=train_samples,
-            image_dir=img_train_dir,
-            label_dir=label_train_dir,
-            used_names=used_train_names,
-            dataset_roots=dataset_roots,
-            class_to_id=class_to_id,
-            do_augment=aug_enabled,
-            progress_total=total_steps,
-            progress_done=done_steps,
-            progress_callback=progress_callback,
-            log_callback=log_callback,
-            is_cancelled=is_cancelled,
-            augment_workers=augment_workers,
-        )
-        self._log(log_callback, f"train 导出耗时: {perf_counter() - train_export_started_at:.2f}s")
+        export_started = False
+        try:
+            export_started = True
+            train_export_started_at = perf_counter()
+            summary.train_images, summary.augmented_images, done_steps = self._export_split(
+                split_name="train",
+                samples=train_samples,
+                image_dir=img_train_dir,
+                label_dir=label_train_dir,
+                used_names=used_train_names,
+                dataset_roots=dataset_roots,
+                class_to_id=class_to_id,
+                do_augment=aug_enabled,
+                progress_total=total_steps,
+                progress_done=done_steps,
+                progress_callback=progress_callback,
+                log_callback=log_callback,
+                is_cancelled=is_cancelled,
+                augment_workers=augment_workers,
+            )
+            self._log(log_callback, f"train 导出耗时: {perf_counter() - train_export_started_at:.2f}s")
 
-        val_export_started_at = perf_counter()
-        val_images, val_aug_count, done_steps = self._export_split(
-            split_name="val",
-            samples=val_samples,
-            image_dir=img_val_dir,
-            label_dir=label_val_dir,
-            used_names=used_val_names,
-            dataset_roots=dataset_roots,
-            class_to_id=class_to_id,
-            do_augment=aug_enabled and self.config.augment_scope == "both",
-            progress_total=total_steps,
-            progress_done=done_steps,
-            progress_callback=progress_callback,
-            log_callback=log_callback,
-            is_cancelled=is_cancelled,
-            augment_workers=augment_workers,
-        )
-        self._log(log_callback, f"val 导出耗时: {perf_counter() - val_export_started_at:.2f}s")
-        summary.val_images = val_images
-        summary.augmented_images += val_aug_count
+            val_export_started_at = perf_counter()
+            val_images, val_aug_count, done_steps = self._export_split(
+                split_name="val",
+                samples=val_samples,
+                image_dir=img_val_dir,
+                label_dir=label_val_dir,
+                used_names=used_val_names,
+                dataset_roots=dataset_roots,
+                class_to_id=class_to_id,
+                do_augment=aug_enabled and self.config.augment_scope == "both",
+                progress_total=total_steps,
+                progress_done=done_steps,
+                progress_callback=progress_callback,
+                log_callback=log_callback,
+                is_cancelled=is_cancelled,
+                augment_workers=augment_workers,
+            )
+            self._log(log_callback, f"val 导出耗时: {perf_counter() - val_export_started_at:.2f}s")
+            summary.val_images = val_images
+            summary.augmented_images += val_aug_count
+        except BaseException:
+            if export_started:
+                self._log(log_callback, "[清理] 导出中断，正在清理不完整的输出...")
+                self._cleanup_partial_output(output_root)
+            clear_voc_cache()
+            raise
 
         classes_path = output_root / "classes.txt"
         save_classes(classes_path, class_names)
@@ -231,11 +255,12 @@ class DataPrepPipeline:
         source_images = len(image_paths)
         self._log(log_callback, f"扫描到图片: {source_images} 张")
 
+        seen_xml_map: Dict[str, Path] = {}
         for path in image_paths:
             if is_cancelled and is_cancelled():
                 raise RuntimeError("任务已取消")
 
-            xml_path = find_voc_for_image(path, dataset_root)
+            xml_path = find_voc_for_image(path, dataset_root, seen_xml_map)
             boxes = []
             width: Optional[int] = None
             height: Optional[int] = None
@@ -504,7 +529,7 @@ class DataPrepPipeline:
 
     def _save_data_yaml(self, yaml_path: Path, output_root: Path, class_names: List[str]) -> None:
         data_config = {
-            "path": str(output_root),
+            "path": ".",
             "train": "images/train",
             "val": "images/val",
             "nc": len(class_names),
@@ -521,6 +546,26 @@ class DataPrepPipeline:
     ) -> None:
         if callback:
             callback(max(0, min(100, percent)), text)
+
+    @staticmethod
+    def _cleanup_partial_output(output_root: Path) -> None:
+        """清理中断导出产生的不完整文件，保留输出根目录本身。"""
+        for sub in ["images", "labels"]:
+            target = output_root / sub
+            if target.is_dir():
+                shutil.rmtree(target, ignore_errors=True)
+        for name in ["classes.txt", "data.yaml"]:
+            target = output_root / name
+            if target.exists():
+                target.unlink(missing_ok=True)
+
+    @staticmethod
+    def _is_subpath(child: Path, parent: Path) -> bool:
+        try:
+            child.relative_to(parent)
+            return True
+        except ValueError:
+            return False
 
     def _log(self, callback: Optional[Callable[[str], None]], text: str) -> None:
         if callback:
