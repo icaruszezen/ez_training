@@ -4,6 +4,7 @@ import base64
 import json
 import logging
 import re
+import time
 from pathlib import Path
 from time import perf_counter
 from typing import Dict, List, Tuple
@@ -22,6 +23,11 @@ class VisionModelService:
 
     负责图片编码、API 请求构建、模型调用和响应解析。
     """
+
+    MAX_RETRIES = 3
+    RETRY_BACKOFF_BASE = 2.0
+    _RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+    IMAGE_SIZE_WARNING_BYTES = 20 * 1024 * 1024  # 20 MB
 
     SUPPORTED_FORMATS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
     MIME_TYPES = {
@@ -63,6 +69,14 @@ class VisionModelService:
             )
 
         mime_type = self.MIME_TYPES[suffix]
+
+        file_size = path.stat().st_size
+        if file_size > self.IMAGE_SIZE_WARNING_BYTES:
+            logger.warning(
+                "图片文件较大 (%.1f MB)，编码可能消耗较多内存: %s",
+                file_size / (1024 * 1024),
+                image_path,
+            )
 
         with open(path, "rb") as f:
             image_data = f.read()
@@ -274,6 +288,115 @@ class VisionModelService:
             ],
             "max_tokens": 4096,
         }
+    def _send_request(self, payload: dict) -> DetectionResult:
+        """发送 API 请求并解析响应，内置指数退避重试。
+
+        对 ConnectionError、Timeout 和可重试 HTTP 状态码（429/5xx）自动重试，
+        最多 MAX_RETRIES 次，每次等待 RETRY_BACKOFF_BASE ** attempt 秒。
+
+        Args:
+            payload: 符合 OpenAI Vision API 规范的请求体
+
+        Returns:
+            DetectionResult
+        """
+        config = self._config_manager.get_config()
+        headers = {
+            "Authorization": f"Bearer {config.api_key}",
+            "Content-Type": "application/json",
+        }
+
+        last_error_msg = ""
+        last_raw_response = ""
+        for attempt in range(self.MAX_RETRIES):
+            try:
+                response = requests.post(
+                    config.endpoint,
+                    headers=headers,
+                    json=payload,
+                    timeout=config.timeout,
+                )
+                response.raise_for_status()
+            except requests.Timeout:
+                last_error_msg = (
+                    f"请求超时（{config.timeout}秒），请检查网络或增加超时时间"
+                )
+                logger.warning("第 %d/%d 次尝试超时", attempt + 1, self.MAX_RETRIES)
+                time.sleep(self.RETRY_BACKOFF_BASE ** attempt)
+                continue
+            except requests.ConnectionError as e:
+                last_error_msg = f"网络连接失败: {e}"
+                logger.warning(
+                    "第 %d/%d 次尝试连接失败: %s",
+                    attempt + 1, self.MAX_RETRIES, e,
+                )
+                time.sleep(self.RETRY_BACKOFF_BASE ** attempt)
+                continue
+            except requests.HTTPError as e:
+                status_code = response.status_code
+                last_raw_response = response.text
+                if status_code == 413:
+                    msg = (
+                        f"API 请求失败 (HTTP {status_code}): 请求体过大，"
+                        "请尝试减少参考图片数量或压缩图片"
+                    )
+                    logger.error(msg)
+                    return DetectionResult(
+                        success=False, error_message=msg,
+                        raw_response=response.text,
+                    )
+                if status_code in self._RETRYABLE_STATUS_CODES:
+                    last_error_msg = (
+                        f"API 请求失败 (HTTP {status_code}): {e}"
+                    )
+                    logger.warning(
+                        "第 %d/%d 次尝试收到 HTTP %d，将重试",
+                        attempt + 1, self.MAX_RETRIES, status_code,
+                    )
+                    time.sleep(self.RETRY_BACKOFF_BASE ** attempt)
+                    continue
+                msg = f"API 请求失败 (HTTP {status_code}): {e}"
+                logger.error(msg)
+                return DetectionResult(
+                    success=False, error_message=msg,
+                    raw_response=response.text,
+                )
+            except requests.RequestException as e:
+                msg = f"请求异常: {e}"
+                logger.error(msg)
+                return DetectionResult(success=False, error_message=msg)
+
+            # 解析响应
+            try:
+                resp_data = response.json()
+                content_text = resp_data["choices"][0]["message"]["content"]
+            except (KeyError, IndexError, TypeError, ValueError) as e:
+                msg = f"响应结构异常: {e}"
+                logger.error("%s\n原始响应: %s", msg, response.text)
+                return DetectionResult(
+                    success=False, error_message=msg,
+                    raw_response=response.text,
+                )
+
+            try:
+                boxes = self.parse_response(content_text)
+            except ValueError as e:
+                logger.error("响应解析失败: %s", e)
+                return DetectionResult(
+                    success=False, error_message=str(e),
+                    raw_response=content_text,
+                )
+
+            return DetectionResult(
+                success=True, boxes=boxes, raw_response=content_text,
+            )
+
+        logger.error("重试 %d 次后仍失败: %s", self.MAX_RETRIES, last_error_msg)
+        return DetectionResult(
+            success=False, error_message=last_error_msg,
+            raw_response=last_raw_response,
+        )
+
     def detect_objects(self, image_path: str, prompt: str) -> DetectionResult:
         """调用模型检测图片中的目标
 
@@ -287,74 +410,14 @@ class VisionModelService:
             DetectionResult，成功时 success=True 且 boxes 包含检测结果，
             失败时 success=False 且 error_message 包含错误信息。
         """
-        # 1. 编码图片
         try:
             base64_data, mime_type = self.encode_image_base64(image_path)
         except (FileNotFoundError, ValueError, OSError) as e:
             logger.error("图片编码失败: %s", e)
             return DetectionResult(success=False, error_message=f"图片编码失败: {e}")
 
-        # 2. 构建请求体
         payload = self.build_request_payload(base64_data, mime_type, prompt)
-
-        # 3. 获取配置
-        config = self._config_manager.get_config()
-
-        headers = {
-            "Authorization": f"Bearer {config.api_key}",
-            "Content-Type": "application/json",
-        }
-
-        # 4. 发送 POST 请求
-        try:
-            response = requests.post(
-                config.endpoint,
-                headers=headers,
-                json=payload,
-                timeout=config.timeout,
-            )
-            response.raise_for_status()
-        except requests.Timeout:
-            msg = f"请求超时（{config.timeout}秒），请检查网络或增加超时时间"
-            logger.error(msg)
-            return DetectionResult(success=False, error_message=msg)
-        except requests.ConnectionError as e:
-            msg = f"网络连接失败: {e}"
-            logger.error(msg)
-            return DetectionResult(success=False, error_message=msg)
-        except requests.HTTPError as e:
-            msg = f"API 请求失败 (HTTP {response.status_code}): {e}"
-            logger.error(msg)
-            return DetectionResult(
-                success=False,
-                error_message=msg,
-                raw_response=response.text,
-            )
-        except requests.RequestException as e:
-            msg = f"请求异常: {e}"
-            logger.error(msg)
-            return DetectionResult(success=False, error_message=msg)
-
-        # 5. 解析响应
-        try:
-            resp_data = response.json()
-            content_text = resp_data["choices"][0]["message"]["content"]
-        except (KeyError, IndexError, TypeError, ValueError) as e:
-            msg = f"响应结构异常: {e}"
-            logger.error("%s\n原始响应: %s", msg, response.text)
-            return DetectionResult(
-                success=False, error_message=msg, raw_response=response.text
-            )
-
-        try:
-            boxes = self.parse_response(content_text)
-        except ValueError as e:
-            logger.error("响应解析失败: %s", e)
-            return DetectionResult(
-                success=False, error_message=str(e), raw_response=content_text
-            )
-
-        return DetectionResult(success=True, boxes=boxes, raw_response=content_text)
+        return self._send_request(payload)
 
     def detect_objects_with_reference(
         self,
@@ -375,15 +438,12 @@ class VisionModelService:
             DetectionResult，成功时 success=True 且 boxes 包含检测结果，
             失败时 success=False 且 error_message 包含错误信息。
         """
-        # 1. 编码参考图片 (需求 4.1)
         encoded_references = self.encode_reference_images(reference_paths)
-        # 需求 7.2: 参考图片编码全部失败时返回错误
         if not encoded_references:
             msg = "所有参考图片编码失败，请检查参考图片文件是否有效"
             logger.error(msg)
             return DetectionResult(success=False, error_message=msg)
 
-        # 2. 编码待检测图片 (需求 4.2)
         try:
             target_image = self.encode_image_base64(target_path)
         except (FileNotFoundError, ValueError, OSError) as e:
@@ -392,78 +452,12 @@ class VisionModelService:
                 success=False, error_message=f"待检测图片编码失败: {e}"
             )
 
-        # 3. 构建请求体 (需求 4.3, 4.4)
         payload = self.build_reference_image_payload(
             reference_images=encoded_references,
             target_image=target_image,
             user_description=user_description,
         )
-
-        # 4. 获取配置并发送 API 请求
-        config = self._config_manager.get_config()
-
-        headers = {
-            "Authorization": f"Bearer {config.api_key}",
-            "Content-Type": "application/json",
-        }
-
-        try:
-            response = requests.post(
-                config.endpoint,
-                headers=headers,
-                json=payload,
-                timeout=config.timeout,
-            )
-            response.raise_for_status()
-        except requests.Timeout:
-            msg = f"请求超时（{config.timeout}秒），请检查网络或增加超时时间"
-            logger.error(msg)
-            return DetectionResult(success=False, error_message=msg)
-        except requests.ConnectionError as e:
-            msg = f"网络连接失败: {e}"
-            logger.error(msg)
-            return DetectionResult(success=False, error_message=msg)
-        except requests.HTTPError as e:
-            status_code = response.status_code
-            # 需求 7.3: 请求体过大时建议减少参考图片
-            if status_code == 413:
-                msg = (
-                    f"API 请求失败 (HTTP {status_code}): 请求体过大，"
-                    "请尝试减少参考图片数量或压缩图片"
-                )
-            else:
-                msg = f"API 请求失败 (HTTP {status_code}): {e}"
-            logger.error(msg)
-            return DetectionResult(
-                success=False,
-                error_message=msg,
-                raw_response=response.text,
-            )
-        except requests.RequestException as e:
-            msg = f"请求异常: {e}"
-            logger.error(msg)
-            return DetectionResult(success=False, error_message=msg)
-
-        # 5. 解析响应
-        try:
-            resp_data = response.json()
-            content_text = resp_data["choices"][0]["message"]["content"]
-        except (KeyError, IndexError, TypeError, ValueError) as e:
-            msg = f"响应结构异常: {e}"
-            logger.error("%s\n原始响应: %s", msg, response.text)
-            return DetectionResult(
-                success=False, error_message=msg, raw_response=response.text
-            )
-
-        try:
-            boxes = self.parse_response(content_text)
-        except ValueError as e:
-            logger.error("响应解析失败: %s", e)
-            return DetectionResult(
-                success=False, error_message=str(e), raw_response=content_text
-            )
-
-        return DetectionResult(success=True, boxes=boxes, raw_response=content_text)
+        return self._send_request(payload)
 
 
 
@@ -480,8 +474,7 @@ class VisionModelService:
         """
         stripped = text.strip()
 
-        # 尝试匹配 ```json ... ``` 或 ``` ... ``` 代码块
-        match = re.search(r"```(?:json)?\s*\n?(.*?)\n?\s*```", stripped, re.DOTALL)
+        match = re.search(r"```\w*\s*\n?(.*?)\n?\s*```", stripped, re.DOTALL)
         if match:
             return match.group(1).strip()
 
@@ -565,10 +558,24 @@ class VisionModelService:
 
             x_min, y_min, x_max, y_max = coords
 
+            if x_min < 0 or y_min < 0:
+                logger.warning(
+                    "objects[%d] 包含负坐标 (%d,%d,%d,%d)，已跳过",
+                    i, x_min, y_min, x_max, y_max,
+                )
+                continue
+
+            if x_min >= x_max or y_min >= y_max:
+                logger.warning(
+                    "objects[%d] 为退化框 (%d,%d,%d,%d)，已跳过",
+                    i, x_min, y_min, x_max, y_max,
+                )
+                continue
+
             # 提取 confidence（可选，默认 1.0）
             confidence = obj.get("confidence", 1.0)
             try:
-                confidence = float(confidence)
+                confidence = max(0.0, min(1.0, float(confidence)))
             except (TypeError, ValueError):
                 confidence = 1.0
 

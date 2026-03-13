@@ -804,6 +804,8 @@ class PrelabelingPage(QWidget):
         if not self._log_flush_timer.isActive():
             self._log_flush_timer.start()
 
+    _MAX_LOG_LINES = 5000
+
     def _flush_log_buffer(self) -> None:
         if not self._log_buffer:
             self._log_flush_timer.stop()
@@ -811,6 +813,20 @@ class PrelabelingPage(QWidget):
         chunk = "\n".join(self._log_buffer)
         self._log_buffer.clear()
         self.log_text.append(chunk)
+
+        doc = self.log_text.document()
+        if doc.blockCount() > self._MAX_LOG_LINES:
+            cursor = QTextCursor(doc)
+            cursor.movePosition(QTextCursor.Start)
+            excess = doc.blockCount() - self._MAX_LOG_LINES
+            for _ in range(excess):
+                cursor.movePosition(QTextCursor.Down, QTextCursor.KeepAnchor)
+            cursor.movePosition(
+                QTextCursor.StartOfBlock, QTextCursor.KeepAnchor,
+            )
+            cursor.removeSelectedText()
+            cursor.deleteChar()
+
         cursor = self.log_text.textCursor()
         cursor.movePosition(QTextCursor.End)
         self.log_text.setTextCursor(cursor)
@@ -1005,11 +1021,14 @@ class PrelabelingPage(QWidget):
         self._set_running_state(False)
         self.progress_bar.setValue(100)
 
+        not_processed = stats.total - stats.processed - stats.skipped
         summary = (
             f"预标注完成 - 总计: {stats.total}, "
             f"成功: {stats.success}, 失败: {stats.failed}, "
             f"跳过: {stats.skipped}"
         )
+        if not_processed > 0:
+            summary += f", 未处理: {not_processed}"
         self._log(summary)
         if self._run_started_at is not None:
             elapsed = perf_counter() - self._run_started_at

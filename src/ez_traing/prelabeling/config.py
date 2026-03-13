@@ -2,6 +2,8 @@
 
 import json
 import logging
+import os
+import sys
 from dataclasses import asdict
 from pathlib import Path
 from typing import Optional
@@ -48,6 +50,12 @@ class APIConfigManager:
             logger.info("配置加载成功: %s", self._config_path)
         except (json.JSONDecodeError, OSError) as e:
             logger.warning("配置加载失败，使用默认配置: %s", e)
+            bak = self._config_path.with_suffix(".json.bak")
+            try:
+                self._config_path.rename(bak)
+                logger.info("已将损坏的配置备份到 %s", bak)
+            except OSError:
+                pass
             self._config = VisionAPIConfig()
 
     def save(self) -> None:
@@ -56,6 +64,11 @@ class APIConfigManager:
             self._config_dir.mkdir(parents=True, exist_ok=True)
             with open(self._config_path, "w", encoding="utf-8") as f:
                 json.dump(asdict(self._config), f, indent=2, ensure_ascii=False)
+            if sys.platform != "win32":
+                try:
+                    os.chmod(self._config_path, 0o600)
+                except OSError:
+                    pass
             logger.info("配置保存成功: %s", self._config_path)
         except OSError as e:
             logger.error("配置保存失败: %s", e)

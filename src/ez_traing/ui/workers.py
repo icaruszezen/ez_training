@@ -1,5 +1,6 @@
 """Reusable background workers shared across pages."""
 
+import logging
 import os
 from pathlib import Path
 from typing import List
@@ -8,6 +9,8 @@ from PyQt5.QtCore import Qt, QSize, QThread, pyqtSignal
 from PyQt5.QtGui import QImage, QImageReader
 
 from ez_traing.common.constants import SUPPORTED_IMAGE_FORMATS
+
+logger = logging.getLogger(__name__)
 
 
 class ThumbnailLoader(QThread):
@@ -40,7 +43,7 @@ class ThumbnailLoader(QThread):
                 if not image.isNull():
                     self.thumbnail_loaded.emit(path, image)
             except Exception:
-                pass
+                logger.debug("Failed to load thumbnail: %s", path, exc_info=True)
         if not self._is_cancelled:
             self.all_loaded.emit()
 

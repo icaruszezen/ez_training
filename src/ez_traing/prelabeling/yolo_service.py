@@ -1,16 +1,33 @@
 """本地 YOLO .pt 推理服务。"""
 
 import logging
+import threading
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from ez_traing.prelabeling.models import BoundingBox, DetectionResult
 
 logger = logging.getLogger(__name__)
 
 
+def _is_oom_error(exc: Exception) -> bool:
+    """判断异常是否为 GPU OOM。"""
+    cls_name = type(exc).__name__
+    if cls_name == "OutOfMemoryError":
+        return True
+    if isinstance(exc, RuntimeError) and "out of memory" in str(exc).lower():
+        return True
+    return False
+
+
 class YoloModelService:
-    """基于 Ultralytics YOLO 的本地推理服务。"""
+    """基于 Ultralytics YOLO 的本地推理服务。
+
+    内置类级别模型缓存：相同 model_path 只加载一次。
+    """
+
+    _model_cache: Dict[str, object] = {}
+    _cache_lock = threading.Lock()
 
     def __init__(
         self,
@@ -40,22 +57,44 @@ class YoloModelService:
                 "未安装 ultralytics，请先安装后再使用本地 YOLO 推理"
             ) from e
 
-        self._model = YOLO(self._model_path)
+        resolved = str(path.resolve())
+        with self._cache_lock:
+            if resolved in self._model_cache:
+                logger.info("复用已缓存的 YOLO 模型: %s", self._model_path)
+                self._model = self._model_cache[resolved]
+            else:
+                self._model = YOLO(self._model_path)
+                self._model_cache[resolved] = self._model
+                logger.info("YOLO 模型已加载并缓存: %s", self._model_path)
+
+    def _predict(
+        self, image_path: str, device: Optional[str] = None,
+    ) -> list:
+        return self._model.predict(
+            source=image_path,
+            conf=self._conf_threshold,
+            iou=self._iou_threshold,
+            device=device if device is not None else self._device,
+            verbose=False,
+        )
 
     def detect_objects(self, image_path: str) -> DetectionResult:
-        """对单张图片执行本地 YOLO 推理。"""
+        """对单张图片执行本地 YOLO 推理。GPU OOM 时自动降级到 CPU 重试。"""
         try:
-            results = self._model.predict(
-                source=image_path,
-                conf=self._conf_threshold,
-                iou=self._iou_threshold,
-                device=self._device,
-                verbose=False,
-            )
+            results = self._predict(image_path)
         except Exception as e:
-            msg = f"YOLO 推理失败: {e}"
-            logger.exception(msg)
-            return DetectionResult(success=False, error_message=msg)
+            if _is_oom_error(e) and self._device != "cpu":
+                logger.warning("GPU 显存不足，自动降级到 CPU 重试: %s", e)
+                try:
+                    results = self._predict(image_path, device="cpu")
+                except Exception as cpu_e:
+                    msg = f"YOLO CPU 降级推理也失败: {cpu_e}"
+                    logger.exception(msg)
+                    return DetectionResult(success=False, error_message=msg)
+            else:
+                msg = f"YOLO 推理失败: {e}"
+                logger.exception(msg)
+                return DetectionResult(success=False, error_message=msg)
 
         if not results:
             return DetectionResult(success=True, boxes=[])

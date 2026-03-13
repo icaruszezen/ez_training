@@ -8,15 +8,14 @@ import logging
 import os
 import tempfile
 import uuid
-import xml.etree.ElementTree as ET
 from collections import Counter, OrderedDict
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
-from PyQt5.QtCore import Qt, QSize, QThread, pyqtSignal, QTimer
-from PyQt5.QtGui import QPixmap, QIcon, QImage, QImageReader, QColor, QPainter, QBrush, QPen, QPalette
+from PyQt5.QtCore import Qt, QSize, QThread, pyqtSignal
+from PyQt5.QtGui import QPixmap, QIcon, QImage, QImageReader, QColor, QFont, QPainter, QPen, QPalette
 from PyQt5.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -55,8 +54,13 @@ from qfluentwidgets import (
     SwitchButton,
 )
 
+from ez_traing.common.annotation_utils import (
+    parse_yolo_labels,
+    parse_voc_labels,
+    read_annotation_boxes,
+)
 from ez_traing.common.constants import SUPPORTED_IMAGE_FORMATS, get_config_dir
-from ez_traing.ui.painting import begin_label_painter, draw_box_label
+from ez_traing.ui.painting import draw_box_label
 from ez_traing.ui.workers import ThumbnailLoader
 
 logger = logging.getLogger(__name__)
@@ -537,7 +541,6 @@ class ImageScanner(QThread):
         self.recursive = recursive
         self._is_cancelled = False
         self._class_names: List[str] = []
-        self._voc_label_cache: Dict[Tuple[str, int], List[str]] = {}
     
     def _load_classes(self):
         """加载 YOLO classes.txt 文件"""
@@ -557,59 +560,7 @@ class ImageScanner(QThread):
                         self._class_names = [line.strip() for line in f if line.strip()]
                     return
                 except Exception:
-                    pass
-    
-    def _parse_yolo_annotation(self, txt_path: Path) -> List[str]:
-        """解析 YOLO 格式标注文件，返回标签列表"""
-        labels = []
-        try:
-            with open(txt_path, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    parts = line.split()
-                    if len(parts) >= 5:  # YOLO format: class_id x y w h
-                        try:
-                            class_id = int(parts[0])
-                            if self._class_names and 0 <= class_id < len(self._class_names):
-                                labels.append(self._class_names[class_id])
-                            else:
-                                labels.append(f"class_{class_id}")
-                        except ValueError:
-                            pass
-        except Exception:
-            pass
-        return labels
-    
-    def _parse_voc_annotation(self, xml_path: Path) -> List[str]:
-        """解析 VOC 格式标注文件，返回标签列表"""
-        labels = []
-        try:
-            resolved = xml_path.resolve()
-            mtime_ns = resolved.stat().st_mtime_ns
-            cache_key = (str(resolved), mtime_ns)
-            cached = self._voc_label_cache.get(cache_key)
-            if cached is not None:
-                return list(cached)
-        except OSError:
-            resolved = xml_path
-            cache_key = None
-        try:
-            tree = ET.parse(resolved)
-            root = tree.getroot()
-            for obj in root.findall("object"):
-                name = obj.find("name")
-                if name is not None and name.text:
-                    labels.append(name.text)
-        except Exception:
-            pass
-        if cache_key is not None:
-            stale_keys = [k for k in self._voc_label_cache.keys() if k[0] == cache_key[0] and k != cache_key]
-            for key in stale_keys:
-                self._voc_label_cache.pop(key, None)
-            self._voc_label_cache[cache_key] = list(labels)
-        return labels
+                    logger.debug("Failed to load classes from %s", path)
     
     def run(self):
         image_infos = []
@@ -621,14 +572,14 @@ class ImageScanner(QThread):
         
         for directory in self._directories:
             if self._is_cancelled:
-                return
+                break
             if not os.path.isdir(directory):
                 continue
             try:
                 if self.recursive:
                     for root, _, files in os.walk(directory):
                         if self._is_cancelled:
-                            return
+                            break
                         for file in files:
                             if Path(file).suffix.lower() in SUPPORTED_IMAGE_FORMATS:
                                 all_files.append(os.path.join(root, file))
@@ -645,22 +596,22 @@ class ImageScanner(QThread):
         
         for i, file_path in enumerate(all_files):
             if self._is_cancelled:
-                return
+                break
             
             path = Path(file_path)
             labels = []
             
             txt_path = path.with_suffix(".txt")
             if txt_path.exists():
-                labels = self._parse_yolo_annotation(txt_path)
+                labels = parse_yolo_labels(txt_path, self._class_names)
                 if not labels:
                     xml_path = path.with_suffix(".xml")
                     if xml_path.exists():
-                        labels = self._parse_voc_annotation(xml_path)
+                        labels = parse_voc_labels(xml_path)
             else:
                 xml_path = path.with_suffix(".xml")
                 if xml_path.exists():
-                    labels = self._parse_voc_annotation(xml_path)
+                    labels = parse_voc_labels(xml_path)
             
             is_annotated = bool(labels)
             if is_annotated:
@@ -711,24 +662,24 @@ class ProjectListWidget(CardWidget):
         self.project_list = QListWidget()
         self.project_list.setStyleSheet("""
             QListWidget {
-                background-color: #fafafa;
-                border: 1px solid #e0e0e0;
+                background-color: palette(base);
+                border: 1px solid palette(mid);
                 border-radius: 8px;
                 outline: none;
             }
             QListWidget::item {
                 padding: 12px;
-                border-bottom: 1px solid #eeeeee;
+                border-bottom: 1px solid palette(midlight);
             }
             QListWidget::item:last-child {
                 border-bottom: none;
             }
             QListWidget::item:selected {
-                background-color: #e3f2fd;
-                color: #1976d2;
+                background-color: palette(highlight);
+                color: palette(highlighted-text);
             }
             QListWidget::item:hover {
-                background-color: #f5f5f5;
+                background-color: palette(alternate-base);
             }
         """)
         self.project_list.itemClicked.connect(self._on_item_clicked)
@@ -885,7 +836,7 @@ class StatisticsPanel(CardWidget):
         overview_card = QFrame()
         overview_card.setStyleSheet("""
             QFrame {
-                background-color: #f8f9fa;
+                background-color: palette(alternate-base);
                 border-radius: 8px;
                 padding: 8px;
             }
@@ -951,9 +902,9 @@ class StatisticsPanel(CardWidget):
         scroll_area.setMaximumHeight(200)
         scroll_area.setStyleSheet("""
             QScrollArea {
-                border: 1px solid #e0e0e0;
+                border: 1px solid palette(mid);
                 border-radius: 6px;
-                background-color: #ffffff;
+                background-color: palette(base);
             }
         """)
         
@@ -997,7 +948,7 @@ class StatisticsPanel(CardWidget):
         if not label_counts:
             self.labels_count_label.setText("0 种标签")
             no_label = CaptionLabel("暂无标签数据")
-            no_label.setStyleSheet("color: #999999;")
+            no_label.setStyleSheet("color: palette(mid);")
             self.labels_layout.insertWidget(0, no_label)
             return
         
@@ -1030,12 +981,12 @@ class StatisticsPanel(CardWidget):
             
             # 标签名
             name_label = BodyLabel(label)
-            name_label.setStyleSheet("color: #333333;")
+            name_label.setStyleSheet("color: palette(text);")
             row_layout.addWidget(name_label, 1)
             
             # 数量和百分比
             count_label = CaptionLabel(f"{count} ({percentage:.1f}%)")
-            count_label.setStyleSheet("color: #666666;")
+            count_label.setStyleSheet("color: palette(dark);")
             row_layout.addWidget(count_label)
             
             self.labels_layout.insertWidget(self.labels_layout.count() - 1, row)
@@ -1052,14 +1003,97 @@ class StatisticsPanel(CardWidget):
         self._update_labels({})
 
 
-class ImagePreviewWidget(QFrame):
-    """图片预览组件"""
-    
+class _AnnotatedPreviewWorker(QThread):
+    """Background worker that loads an image, draws annotation overlays, and scales."""
+
+    finished = pyqtSignal(str, QImage)
+
     _LABEL_COLORS = [
         (0, 255, 0), (255, 0, 0), (0, 0, 255), (255, 165, 0),
         (128, 0, 128), (0, 255, 255), (255, 255, 0), (255, 0, 255),
         (0, 128, 0), (0, 0, 128), (128, 128, 0), (128, 0, 0),
     ]
+
+    def __init__(self, image_path: str, class_names: List[str],
+                 target_w: int, target_h: int):
+        super().__init__()
+        self._image_path = image_path
+        self._class_names = list(class_names)
+        self._target_w = target_w
+        self._target_h = target_h
+        self._is_cancelled = False
+
+    def cancel(self):
+        self._is_cancelled = True
+
+    def run(self):
+        if self._is_cancelled:
+            return
+        reader = QImageReader(self._image_path)
+        reader.setAutoTransform(True)
+        orig_size = reader.size()
+        if not orig_size.isValid() or self._is_cancelled:
+            return
+
+        img_w, img_h = orig_size.width(), orig_size.height()
+        annotations = read_annotation_boxes(
+            self._image_path, img_w, img_h, self._class_names,
+        )
+        if self._is_cancelled:
+            return
+
+        if annotations:
+            image = reader.read()
+            if image.isNull() or self._is_cancelled:
+                return
+            self._draw_on_image(image, annotations)
+            if self._is_cancelled:
+                return
+            result = image.scaled(self._target_w, self._target_h,
+                                  Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        else:
+            target = QSize(self._target_w, self._target_h)
+            load_size = orig_size.scaled(target, Qt.KeepAspectRatio)
+            reader.setScaledSize(load_size)
+            result = reader.read()
+            if result.isNull():
+                return
+
+        if not self._is_cancelled:
+            self.finished.emit(self._image_path, result)
+
+    def _draw_on_image(self, image: QImage, annotations: List[dict]):
+        label_set = sorted({a["label"] for a in annotations})
+        color_map = {
+            lbl: self._LABEL_COLORS[i % len(self._LABEL_COLORS)]
+            for i, lbl in enumerate(label_set)
+        }
+        painter = QPainter(image)
+        painter.setRenderHint(QPainter.Antialiasing)
+        for ann in annotations:
+            r, g, b = color_map[ann["label"]]
+            pen = QPen(QColor(r, g, b))
+            pen.setWidth(2)
+            painter.setPen(pen)
+            painter.setBrush(Qt.NoBrush)
+            painter.drawRect(ann["xmin"], ann["ymin"],
+                             ann["xmax"] - ann["xmin"],
+                             ann["ymax"] - ann["ymin"])
+        painter.end()
+        painter = QPainter(image)
+        painter.setRenderHint(QPainter.Antialiasing)
+        font = QFont("Microsoft YaHei", -1)
+        font.setPixelSize(16)
+        painter.setFont(font)
+        for ann in annotations:
+            bgr = tuple(reversed(color_map[ann["label"]]))
+            draw_box_label(painter, ann["label"],
+                           ann["xmin"], ann["ymin"], bgr)
+        painter.end()
+
+
+class ImagePreviewWidget(QFrame):
+    """图片预览组件"""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1069,6 +1103,8 @@ class ImagePreviewWidget(QFrame):
         self._current_path: Optional[str] = None
         self._project_directory: Optional[str] = None
         self._class_names: List[str] = []
+        self._preview_worker: Optional[_AnnotatedPreviewWorker] = None
+        self._preview_generation = 0
     
     def _setup_ui(self):
         layout = QVBoxLayout(self)
@@ -1092,8 +1128,8 @@ class ImagePreviewWidget(QFrame):
         self.preview_label.setMinimumSize(200, 200)
         self.preview_label.setStyleSheet("""
             QLabel {
-                background-color: #f5f5f5;
-                border: 1px solid #e0e0e0;
+                background-color: palette(alternate-base);
+                border: 1px solid palette(mid);
                 border-radius: 8px;
             }
         """)
@@ -1121,6 +1157,7 @@ class ImagePreviewWidget(QFrame):
     def set_image(self, image_path: str):
         """设置预览图片"""
         self._current_path = image_path
+        self._cancel_preview_worker()
         
         if not image_path or not os.path.exists(image_path):
             self.preview_label.setText("选择图片以预览")
@@ -1136,30 +1173,22 @@ class ImagePreviewWidget(QFrame):
             return
         
         img_w, img_h = orig_size.width(), orig_size.height()
+        preview_size = self.preview_label.size()
+        target_w = max(preview_size.width() - 20, 1)
+        target_h = max(preview_size.height() - 20, 1)
 
-        show_annotations = self.annotation_switch.isChecked()
-        annotations = []
-        if show_annotations:
-            annotations = self._read_annotations(image_path, img_w, img_h)
-
-        if annotations:
-            pixmap = QPixmap(image_path)
-            if pixmap.isNull():
-                self.preview_label.setText("无法加载图片")
-                self._clear_info()
-                return
-            pixmap = pixmap.copy()
-            self._draw_annotations(pixmap, annotations)
-            preview_size = self.preview_label.size()
-            scaled = pixmap.scaled(
-                preview_size.width() - 20,
-                preview_size.height() - 20,
-                Qt.KeepAspectRatio,
-                Qt.SmoothTransformation,
+        if self.annotation_switch.isChecked():
+            self._preview_generation += 1
+            gen = self._preview_generation
+            self._preview_worker = _AnnotatedPreviewWorker(
+                image_path, self._class_names, target_w, target_h,
             )
+            self._preview_worker.finished.connect(
+                lambda p, img, _g=gen: self._on_preview_ready(p, img, _g)
+            )
+            self._preview_worker.start()
         else:
-            preview_size = self.preview_label.size()
-            target = QSize(preview_size.width() - 20, preview_size.height() - 20)
+            target = QSize(target_w, target_h)
             load_size = orig_size.scaled(target, Qt.KeepAspectRatio)
             reader.setScaledSize(load_size)
             image = reader.read()
@@ -1167,9 +1196,7 @@ class ImagePreviewWidget(QFrame):
                 self.preview_label.setText("无法加载图片")
                 self._clear_info()
                 return
-            scaled = QPixmap.fromImage(image)
-
-        self.preview_label.setPixmap(scaled)
+            self.preview_label.setPixmap(QPixmap.fromImage(image))
         
         file_path = Path(image_path)
         try:
@@ -1183,6 +1210,15 @@ class ImagePreviewWidget(QFrame):
         
         annotation_status = self._check_annotation_status(image_path)
         self.annotation_status_label.setText(f"标注: {annotation_status}")
+
+    def _cancel_preview_worker(self):
+        if self._preview_worker and self._preview_worker.isRunning():
+            self._preview_worker.cancel()
+
+    def _on_preview_ready(self, path: str, image: QImage, generation: int):
+        if generation != self._preview_generation or path != self._current_path:
+            return
+        self.preview_label.setPixmap(QPixmap.fromImage(image))
     
     def _clear_info(self):
         self.file_name_label.setText("文件名: -")
@@ -1217,7 +1253,7 @@ class ImagePreviewWidget(QFrame):
             if xml_path.exists():
                 return "已标注 (VOC)"
         except Exception:
-            pass
+            logger.debug("Failed to check annotation status for %s", image_path)
         
         return "未标注"
     
@@ -1252,91 +1288,7 @@ class ImagePreviewWidget(QFrame):
                         self._class_names = [line.strip() for line in f if line.strip()]
                     return
                 except Exception:
-                    pass
-
-    def _read_annotations(self, image_path: str, img_w: int, img_h: int) -> List[dict]:
-        """读取标注文件，返回 [{"label", "xmin", "ymin", "xmax", "ymax"}, ...]
-
-        优先级与 ImageScanner 保持一致：YOLO (.txt) -> VOC (.xml)。
-        """
-        path = Path(image_path)
-        boxes: List[dict] = []
-
-        txt_path = path.with_suffix(".txt")
-        if txt_path.exists():
-            try:
-                with open(txt_path, "r", encoding="utf-8") as f:
-                    for line in f:
-                        parts = line.strip().split()
-                        if len(parts) < 5:
-                            continue
-                        class_id = int(parts[0])
-                        cx = float(parts[1]) * img_w
-                        cy = float(parts[2]) * img_h
-                        w = float(parts[3]) * img_w
-                        h = float(parts[4]) * img_h
-                        if self._class_names and 0 <= class_id < len(self._class_names):
-                            label = self._class_names[class_id]
-                        else:
-                            label = f"class_{class_id}"
-                        boxes.append({
-                            "label": label,
-                            "xmin": int(cx - w / 2),
-                            "ymin": int(cy - h / 2),
-                            "xmax": int(cx + w / 2),
-                            "ymax": int(cy + h / 2),
-                        })
-            except Exception:
-                pass
-            return boxes
-
-        xml_path = path.with_suffix(".xml")
-        if xml_path.exists():
-            try:
-                tree = ET.parse(xml_path)
-                for obj in tree.getroot().findall("object"):
-                    name = (obj.findtext("name") or "").strip()
-                    bnd = obj.find("bndbox")
-                    if not name or bnd is None:
-                        continue
-                    boxes.append({
-                        "label": name,
-                        "xmin": int(float((bnd.findtext("xmin") or "0").strip())),
-                        "ymin": int(float((bnd.findtext("ymin") or "0").strip())),
-                        "xmax": int(float((bnd.findtext("xmax") or "0").strip())),
-                        "ymax": int(float((bnd.findtext("ymax") or "0").strip())),
-                    })
-            except Exception:
-                pass
-        return boxes
-
-    def _draw_annotations(self, pixmap: QPixmap, annotations: List[dict]):
-        """在 QPixmap 上绘制标注框和标签"""
-        label_set = sorted({a["label"] for a in annotations})
-        color_map = {
-            lbl: self._LABEL_COLORS[i % len(self._LABEL_COLORS)]
-            for i, lbl in enumerate(label_set)
-        }
-
-        painter = QPainter(pixmap)
-        painter.setRenderHint(QPainter.Antialiasing)
-        for ann in annotations:
-            r, g, b = color_map[ann["label"]]
-            pen = QPen(QColor(r, g, b))
-            pen.setWidth(2)
-            painter.setPen(pen)
-            painter.setBrush(Qt.NoBrush)
-            painter.drawRect(ann["xmin"], ann["ymin"],
-                             ann["xmax"] - ann["xmin"],
-                             ann["ymax"] - ann["ymin"])
-        painter.end()
-
-        label_painter = begin_label_painter(pixmap)
-        for ann in annotations:
-            bgr = tuple(reversed(color_map[ann["label"]]))
-            draw_box_label(label_painter, ann["label"],
-                           ann["xmin"], ann["ymin"], bgr)
-        label_painter.end()
+                    logger.debug("Failed to load class names from %s", p)
 
     def _on_annotation_toggle(self, checked: bool):
         """开关切换时刷新预览"""
@@ -1409,22 +1361,22 @@ class ImageListPanel(CardWidget):
         self.image_list.setUniformItemSizes(True)  # 优化：统一项目大小
         self.image_list.setStyleSheet("""
             QListWidget {
-                background-color: #ffffff;
-                border: 1px solid #e0e0e0;
+                background-color: palette(base);
+                border: 1px solid palette(mid);
                 border-radius: 8px;
             }
             QListWidget::item {
                 padding: 8px;
                 border-radius: 6px;
-                color: #333333;
+                color: palette(text);
             }
             QListWidget::item:selected {
-                background-color: #e3f2fd;
-                border: 2px solid #2196f3;
-                color: #1565c0;
+                background-color: palette(highlight);
+                border: 2px solid palette(highlight);
+                color: palette(highlighted-text);
             }
             QListWidget::item:hover {
-                background-color: #f5f5f5;
+                background-color: palette(alternate-base);
             }
         """)
         self.image_list.itemSelectionChanged.connect(self._on_selection_changed)
@@ -1542,6 +1494,10 @@ class ImageListPanel(CardWidget):
         self._update_page_controls()
         self.reset_filters()
         self.set_type_options([])
+
+    def get_uncached_paths(self, paths: List[str]) -> List[str]:
+        """Return the subset of *paths* not yet present in the thumbnail cache."""
+        return [p for p in paths if p not in self._thumbnail_cache]
 
     def set_type_options(self, image_types: List[str]):
         """设置类型筛选选项"""
@@ -2065,6 +2021,29 @@ class DatasetPage(QWidget):
             self._scanner.cancel()
         if self._thumbnail_loader and self._thumbnail_loader.isRunning():
             self._thumbnail_loader.cancel()
+        self.preview_widget._cancel_preview_worker()
+
+    def _shutdown_workers(self):
+        """取消所有后台线程并等待它们结束，用于页面销毁前的清理。"""
+        workers = [self._scanner, self._thumbnail_loader]
+        pw = self.preview_widget._preview_worker
+        if pw is not None:
+            workers.append(pw)
+        for w in workers:
+            if w is not None and w.isRunning():
+                w.cancel()
+        for w in workers:
+            if w is not None and w.isRunning():
+                w.wait(3000)
+
+    def closeEvent(self, event):
+        self._shutdown_workers()
+        super().closeEvent(event)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self.current_project and not (self._scanner and self._scanner.isRunning()):
+            self._on_refresh_project()
 
     def _load_project(self, project: DatasetProject):
         """加载项目"""
@@ -2190,7 +2169,7 @@ class DatasetPage(QWidget):
             self._thumbnail_loader.cancel()
         self._thumb_generation += 1
         
-        uncached = [p for p in page_paths if p not in self.image_list_panel._thumbnail_cache]
+        uncached = self.image_list_panel.get_uncached_paths(page_paths)
         if not uncached:
             self.progress_bar.setVisible(False)
             self._update_status_after_load()

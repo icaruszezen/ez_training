@@ -2,6 +2,7 @@
 
 import logging
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import List, Optional
@@ -92,6 +93,8 @@ class PrelabelingWorker(QThread):
     image_completed = pyqtSignal(str, bool, str)
     finished = pyqtSignal(object)
 
+    REQUEST_INTERVAL_SEC = 0.1
+
     def __init__(
         self,
         image_paths: List[str],
@@ -116,6 +119,7 @@ class PrelabelingWorker(QThread):
         self._is_cancelled = False
         self._voc_writer = VOCAnnotationWriter()
         self._max_workers = max(1, max_workers)
+        self._rate_lock = threading.Lock()
 
         # 验证并存储检测模式
         self._detection_mode = DetectionMode(detection_mode)
@@ -168,15 +172,13 @@ class PrelabelingWorker(QThread):
 
     def _run_concurrent(self, stats: PrelabelingStats) -> None:
         lock = threading.Lock()
-        completed_count = 0
 
         def _worker(image_path: str, index: int):
-            nonlocal completed_count
             if self._is_cancelled:
                 return
+            with self._rate_lock:
+                time.sleep(self.REQUEST_INTERVAL_SEC)
             self._process_one(image_path, index, stats, lock)
-            with lock:
-                completed_count += 1
 
         with ThreadPoolExecutor(max_workers=self._max_workers) as executor:
             futures = {
@@ -185,9 +187,8 @@ class PrelabelingWorker(QThread):
             }
             for future in as_completed(futures):
                 if self._is_cancelled:
-                    executor.shutdown(wait=False, cancel_futures=True)
+                    executor.shutdown(wait=True, cancel_futures=True)
                     break
-                # 让异常传播到日志而不是静默吞掉
                 try:
                     future.result()
                 except Exception:

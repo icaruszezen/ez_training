@@ -1,16 +1,18 @@
 """VOC 标注文件写入器，封装 PascalVocWriter 提供简化接口"""
 
-import os
+import logging
 import threading
 import xml.etree.ElementTree as ET
 from collections import OrderedDict
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 from PIL import Image
 
 from ez_traing.labeling.pascal_voc_io import PascalVocWriter
 from ez_traing.prelabeling.models import BoundingBox
+
+logger = logging.getLogger(__name__)
 
 _CACHE_MAX_SIZE = 512
 
@@ -75,9 +77,20 @@ class VOCAnnotationWriter:
             local_img_path=str(img_path),
         )
 
+        height, width = image_size[0], image_size[1]
         for box in boxes:
+            x_min = max(0, min(box.x_min, width))
+            y_min = max(0, min(box.y_min, height))
+            x_max = max(0, min(box.x_max, width))
+            y_max = max(0, min(box.y_max, height))
+            if x_min >= x_max or y_min >= y_max:
+                logger.warning(
+                    "退化框已跳过: label=%s coords=(%d,%d,%d,%d)",
+                    box.label, box.x_min, box.y_min, box.x_max, box.y_max,
+                )
+                continue
             writer.add_bnd_box(
-                box.x_min, box.y_min, box.x_max, box.y_max, box.label, difficult=0
+                x_min, y_min, x_max, y_max, box.label, difficult=0
             )
 
         writer.save(output_path)
