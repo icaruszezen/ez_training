@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
 from PyQt5.QtCore import Qt, QSize, QThread, pyqtSignal
-from PyQt5.QtGui import QPixmap, QIcon, QImage, QColor, QBrush, QKeySequence
+from PyQt5.QtGui import QPixmap, QIcon, QImage, QImageReader, QColor, QBrush, QKeySequence
 from PyQt5.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -55,16 +55,40 @@ _COLOR_SUCCESS = QColor(210, 255, 210)
 _COLOR_SAMPLED = QColor(255, 200, 50)
 
 
+def _read_image_size(path: str) -> Optional[Tuple[int, int]]:
+    """Read image dimensions without fully decoding the pixel data.
+
+    Handles EXIF orientation so that reported width/height matches the
+    visually displayed orientation.  Returns ``None`` when the file
+    cannot be read.
+    """
+    reader = QImageReader(path)
+    reader.setAutoTransform(True)
+    size = reader.size()
+    if not size.isValid():
+        return None
+    return (size.width(), size.height())
+
+
 def _shape_bbox_key(shape: dict) -> tuple:
-    """用标签+包围盒坐标生成可比较的 key，用于识别同一标注"""
+    """用标签+包围盒坐标生成可比较的 key，用于识别同一标注。
+
+    Uses ``round()`` instead of ``int()`` to avoid truncation bias when
+    coordinates contain floating-point fractions (common after YOLO
+    coordinate conversion).
+    """
     points = shape["points"]
     xs = [p[0] for p in points]
     ys = [p[1] for p in points]
-    return (shape["label"], int(min(xs)), int(min(ys)), int(max(xs)), int(max(ys)))
+    return (shape["label"], round(min(xs)), round(min(ys)), round(max(xs)), round(max(ys)))
 
 
-def _read_existing_voc_shapes(xml_path: str) -> List[dict]:
-    """读取已有 VOC XML 标注，转换为 shape dict 列表"""
+def _read_existing_voc_shapes(xml_path: str) -> Optional[List[dict]]:
+    """读取已有 VOC XML 标注，转换为 shape dict 列表。
+
+    Returns None on parse error (caller should skip the image to avoid data loss).
+    Returns [] when the annotation file does not exist.
+    """
     if not os.path.exists(xml_path):
         return []
     try:
@@ -86,14 +110,19 @@ def _read_existing_voc_shapes(xml_path: str) -> List[dict]:
                 "difficult": bool(difficult),
             })
         return shapes
-    except Exception:
-        return []
+    except Exception as e:
+        logger.warning("Failed to parse VOC annotation %s: %s", xml_path, e)
+        return None
 
 
 def _read_existing_yolo_shapes(
     txt_path: str, img_width: int, img_height: int, class_list: List[str]
-) -> List[dict]:
-    """读取已有 YOLO TXT 标注，转换为 shape dict 列表"""
+) -> Optional[List[dict]]:
+    """读取已有 YOLO TXT 标注，转换为 shape dict 列表。
+
+    Returns None on parse error (caller should skip the image to avoid data loss).
+    Returns [] when the annotation file does not exist.
+    """
     if not os.path.exists(txt_path):
         return []
     try:
@@ -125,8 +154,9 @@ def _read_existing_yolo_shapes(
                     "difficult": False,
                 })
         return shapes
-    except Exception:
-        return []
+    except Exception as e:
+        logger.warning("Failed to parse YOLO annotation %s: %s", txt_path, e)
+        return None
 
 
 class BatchApplyWorker(QThread):
@@ -151,6 +181,9 @@ class BatchApplyWorker(QThread):
         self._label_format = label_format
         self._class_list = class_list
 
+    def cancel(self):
+        self.requestInterruption()
+
     def run(self):
         applied = 0
         skipped = 0
@@ -166,18 +199,17 @@ class BatchApplyWorker(QThread):
             }
             for s in self._shapes
         ]
-        new_keys = {_shape_bbox_key(s) for s in new_shapes_data}
-
         for i, path in enumerate(self._target_paths):
+            if self.isInterruptionRequested():
+                break
             try:
-                img = QImage(path)
-                if img.isNull():
+                img_size = _read_image_size(path)
+                if img_size is None:
                     self.image_done.emit(path, False, f"无法读取: {Path(path).name}")
                     failed += 1
                     self.progress.emit(i + 1, total)
                     continue
 
-                img_size = (img.width(), img.height())
                 if img_size != self._ref_size:
                     mismatch_paths.append(path)
                     self.image_done.emit(
@@ -197,11 +229,20 @@ class BatchApplyWorker(QThread):
                 if self._label_format == LabelFileFormat.YOLO:
                     ann_path = str(p.with_suffix(".txt"))
                     existing = _read_existing_yolo_shapes(
-                        ann_path, img.width(), img.height(), self._class_list
+                        ann_path, img_size[0], img_size[1], self._class_list
                     )
                 else:
                     ann_path = str(p.with_suffix(".xml"))
                     existing = _read_existing_voc_shapes(ann_path)
+
+                if existing is None:
+                    self.image_done.emit(
+                        path, False,
+                        f"标注文件损坏，跳过: {Path(path).name}",
+                    )
+                    failed += 1
+                    self.progress.emit(i + 1, total)
+                    continue
 
                 # 去重合并：保留已有标注 + 追加新标注中不重复的
                 existing_keys = {_shape_bbox_key(s) for s in existing}
@@ -210,9 +251,13 @@ class BatchApplyWorker(QThread):
 
                 label_file = LabelFile()
                 if self._label_format == LabelFileFormat.YOLO:
+                    save_class_list = list(self._class_list)
+                    for s in merged:
+                        if s["label"] not in save_class_list:
+                            save_class_list.append(s["label"])
                     out = str(p.with_suffix(".txt"))
                     label_file.save_yolo_format(
-                        out, merged, path, None, self._class_list
+                        out, merged, path, None, save_class_list
                     )
                 else:
                     out = str(p.with_suffix(".xml"))
@@ -394,9 +439,10 @@ class BatchImageListPanel(CardWidget):
 
     def mark_mismatch(self, paths: List[str]):
         """将分辨率不匹配的图片标红"""
-        self._mismatch_paths.update(paths)
         for path in paths:
-            item = self._path_to_item.get(self._norm(path))
+            norm = self._norm(path)
+            self._mismatch_paths.add(norm)
+            item = self._path_to_item.get(norm)
             if item:
                 item.setBackground(QBrush(_COLOR_MISMATCH))
                 current = item.text()
@@ -405,10 +451,11 @@ class BatchImageListPanel(CardWidget):
 
     def mark_success(self, path: str):
         """将成功标注的图片标绿"""
-        if path in self._mismatch_paths:
+        norm = self._norm(path)
+        if norm in self._mismatch_paths:
             return
-        self._success_paths.add(path)
-        item = self._path_to_item.get(self._norm(path))
+        self._success_paths.add(norm)
+        item = self._path_to_item.get(norm)
         if item:
             item.setBackground(QBrush(_COLOR_SUCCESS))
 
@@ -516,24 +563,26 @@ class BatchImageListPanel(CardWidget):
         """将当前选中的图片标记为指定颜色"""
         for item in self.image_list.selectedItems():
             path = item.data(Qt.UserRole)
+            norm = self._norm(path)
             item.setBackground(QBrush(color))
             if color == _COLOR_SUCCESS:
-                self._success_paths.add(path)
-                self._mismatch_paths.discard(path)
+                self._success_paths.add(norm)
+                self._mismatch_paths.discard(norm)
                 if "[分辨率不匹配]" in item.text():
                     item.setText(Path(path).name)
             elif color == _COLOR_MISMATCH:
-                self._mismatch_paths.add(path)
-                self._success_paths.discard(path)
+                self._mismatch_paths.add(norm)
+                self._success_paths.discard(norm)
 
     def _clear_selected_marks(self):
         """清除当前选中图片的标记"""
         for item in self.image_list.selectedItems():
             path = item.data(Qt.UserRole)
+            norm = self._norm(path)
             item.setBackground(QBrush())
             item.setText(Path(path).name)
-            self._mismatch_paths.discard(path)
-            self._success_paths.discard(path)
+            self._mismatch_paths.discard(norm)
+            self._success_paths.discard(norm)
 
     def get_selected_paths(self) -> List[str]:
         """获取选中图片路径"""
@@ -564,9 +613,12 @@ class BatchImageListPanel(CardWidget):
         self.image_list.selectAll()
 
     def _invert_selection(self):
+        self.image_list.blockSignals(True)
         for i in range(self.image_list.count()):
             item = self.image_list.item(i)
             item.setSelected(not item.isSelected())
+        self.image_list.blockSignals(False)
+        self._on_selection_changed()
 
     def _clear_selection(self):
         self.image_list.clearSelection()
@@ -607,6 +659,7 @@ class BatchAnnotationPage(QWidget):
         # 加样状态
         self._sampled_paths: Set[str] = set()
         self._sample_dataset_dir: Optional[str] = None
+        self._sample_name_map: Dict[str, str] = {}  # norm(src) -> target filename
         self._setup_ui()
 
     def _setup_ui(self):
@@ -785,6 +838,12 @@ class BatchAnnotationPage(QWidget):
 
         self._current_directory = dirs[0]
         self._reset_sample_state()
+
+        if self._scan_worker and self._scan_worker.isRunning():
+            self._scan_worker.finished.disconnect(self._on_scan_finished)
+            self._scan_worker.cancel()
+            self._scan_worker.wait()
+
         self.status_label.setText(f"正在扫描: {proj.name}...")
         self._scan_worker = ImageScanWorker(proj.id, directories=dirs)
         self._scan_worker.finished.connect(self._on_scan_finished)
@@ -822,10 +881,10 @@ class BatchAnnotationPage(QWidget):
         # 记录加载时已有的标注作为基线，后续只应用新增的标注
         self._baseline_shapes = self._annotation_window._snapshot_current_shapes()
 
-        img = QImage(image_path)
-        if not img.isNull():
+        img_size = _read_image_size(image_path)
+        if img_size is not None:
             baseline_count = len(self._baseline_shapes)
-            info = f"参考分辨率: {img.width()} x {img.height()}"
+            info = f"参考分辨率: {img_size[0]} x {img_size[1]}"
             if baseline_count:
                 info += f" | 已有 {baseline_count} 个标注"
             self.image_panel.ref_info_label.setText(info)
@@ -849,10 +908,10 @@ class BatchAnnotationPage(QWidget):
         self._syncing_selection = True
         self.image_panel.highlight_path(file_path)
         self._baseline_shapes = self._annotation_window._snapshot_current_shapes()
-        img = QImage(file_path)
-        if not img.isNull():
+        img_size = _read_image_size(file_path)
+        if img_size is not None:
             baseline_count = len(self._baseline_shapes)
-            info = f"参考分辨率: {img.width()} x {img.height()}"
+            info = f"参考分辨率: {img_size[0]} x {img_size[1]}"
             if baseline_count:
                 info += f" | 已有 {baseline_count} 个标注"
             self.image_panel.ref_info_label.setText(info)
@@ -908,8 +967,8 @@ class BatchAnnotationPage(QWidget):
         target_paths = selected[1:]
 
         # 获取参考图分辨率
-        ref_img = QImage(ref_path)
-        if ref_img.isNull():
+        ref_size = _read_image_size(ref_path)
+        if ref_size is None:
             InfoBar.error(
                 title="错误",
                 content="无法读取参考图片",
@@ -918,7 +977,6 @@ class BatchAnnotationPage(QWidget):
                 duration=3000,
             )
             return
-        ref_size = (ref_img.width(), ref_img.height())
 
         # 先保存当前标注
         if hasattr(self._annotation_window, "save_file"):
@@ -930,7 +988,17 @@ class BatchAnnotationPage(QWidget):
             "label_file_format",
             LabelFileFormat.PASCAL_VOC,
         )
-        class_list = getattr(self._annotation_window, "label_hist", [])
+        class_list = list(getattr(self._annotation_window, "label_hist", []))
+
+        if label_format == LabelFileFormat.YOLO and not class_list:
+            InfoBar.error(
+                title="错误",
+                content="YOLO 格式需要类别列表，但当前为空。请先确保标注中包含至少一个类别。",
+                parent=self,
+                position=InfoBarPosition.TOP,
+                duration=4000,
+            )
+            return
 
         # 确认对话框
         reply = QMessageBox.question(
@@ -1006,11 +1074,31 @@ class BatchAnnotationPage(QWidget):
     def _on_clear_marks(self):
         self.image_panel.clear_marks()
 
+    def _cancel_apply(self):
+        if self._worker and self._worker.isRunning():
+            self._worker.cancel()
+            self.status_label.setText("正在取消...")
+
     def _set_running_state(self, running: bool):
-        self.apply_btn.setEnabled(not running)
         self.dataset_combo.setEnabled(not running)
         self.clear_marks_btn.setEnabled(not running)
         self.sample_btn.setEnabled(not running)
+        if running:
+            self.apply_btn.setText("取消")
+            self.apply_btn.setEnabled(True)
+            try:
+                self.apply_btn.clicked.disconnect(self._on_apply_clicked)
+            except TypeError:
+                pass
+            self.apply_btn.clicked.connect(self._cancel_apply)
+        else:
+            try:
+                self.apply_btn.clicked.disconnect(self._cancel_apply)
+            except TypeError:
+                pass
+            self.apply_btn.setText("应用标注到选中图片")
+            self.apply_btn.setEnabled(True)
+            self.apply_btn.clicked.connect(self._on_apply_clicked)
 
     # ------------------------------------------------------------------
     # Sample mark (加样)
@@ -1019,6 +1107,7 @@ class BatchAnnotationPage(QWidget):
     def _reset_sample_state(self):
         self._sampled_paths.clear()
         self._sample_dataset_dir = None
+        self._sample_name_map.clear()
         self.image_panel.clear_marks(keep_sampled=False)
 
     def _get_current_dataset_name(self) -> Optional[str]:
@@ -1100,21 +1189,52 @@ class BatchAnnotationPage(QWidget):
         )
         return ".txt" if label_format == LabelFileFormat.YOLO else ".xml"
 
+    def _resolve_sample_name(self, image_path: str) -> str:
+        """Return the target filename for *image_path* inside the sample dir.
+
+        Re-uses a previously assigned name for the same source.  When the
+        preferred name is already taken by a *different* source, a numeric
+        suffix ``_2``, ``_3``, ... is appended until a free slot is found.
+        """
+        norm = os.path.normcase(os.path.abspath(image_path))
+        existing_name = self._sample_name_map.get(norm)
+        if existing_name:
+            return existing_name
+
+        p = Path(image_path)
+        candidate = p.name
+        occupied_names = set(self._sample_name_map.values())
+
+        if candidate in occupied_names:
+            stem, suffix = p.stem, p.suffix
+            counter = 2
+            while f"{stem}_{counter}{suffix}" in occupied_names:
+                counter += 1
+            candidate = f"{stem}_{counter}{suffix}"
+
+        self._sample_name_map[norm] = candidate
+        return candidate
+
     def _copy_to_sample_dir(self, image_path: str) -> bool:
         """复制图片及标注文件到加样数据集目录，返回图片是否复制成功"""
         if not self._sample_dataset_dir:
             return False
         p = Path(image_path)
+        target_name = self._resolve_sample_name(image_path)
+        target_stem = Path(target_name).stem
+        target_suffix = Path(target_name).suffix
+
         try:
-            shutil.copy2(str(p), os.path.join(self._sample_dataset_dir, p.name))
+            shutil.copy2(str(p), os.path.join(self._sample_dataset_dir, target_name))
         except OSError as e:
             logger.warning("Failed to copy image %s: %s", p.name, e)
             return False
 
         ann = p.with_suffix(self._annotation_ext())
         if ann.exists():
+            ann_target = f"{target_stem}{self._annotation_ext()}"
             try:
-                shutil.copy2(str(ann), os.path.join(self._sample_dataset_dir, ann.name))
+                shutil.copy2(str(ann), os.path.join(self._sample_dataset_dir, ann_target))
             except OSError as e:
                 logger.warning("Failed to copy annotation %s: %s", ann.name, e)
         return True
@@ -1123,24 +1243,36 @@ class BatchAnnotationPage(QWidget):
         """从加样数据集目录中删除图片及标注文件"""
         if not self._sample_dataset_dir:
             return
-        p = Path(image_path)
-        for name in (p.name, p.with_suffix(self._annotation_ext()).name):
+        norm = os.path.normcase(os.path.abspath(image_path))
+        target_name = self._sample_name_map.get(norm)
+        if not target_name:
+            return
+        target_stem = Path(target_name).stem
+        ann_name = f"{target_stem}{self._annotation_ext()}"
+        for name in (target_name, ann_name):
             target = os.path.join(self._sample_dataset_dir, name)
             if os.path.isfile(target):
                 try:
                     os.remove(target)
                 except OSError as e:
                     logger.warning("Failed to remove %s: %s", name, e)
+        self._sample_name_map.pop(norm, None)
 
     def _sync_annotation_to_sample_dir(self, image_path: str):
         """将标注文件同步到加样数据集目录"""
         if not self._sample_dataset_dir:
             return
+        norm = os.path.normcase(os.path.abspath(image_path))
+        target_name = self._sample_name_map.get(norm)
+        if not target_name:
+            return
         p = Path(image_path)
         ann = p.with_suffix(self._annotation_ext())
         if ann.exists():
+            target_stem = Path(target_name).stem
+            ann_target = f"{target_stem}{self._annotation_ext()}"
             try:
-                shutil.copy2(str(ann), os.path.join(self._sample_dataset_dir, ann.name))
+                shutil.copy2(str(ann), os.path.join(self._sample_dataset_dir, ann_target))
             except OSError as e:
                 logger.warning("Failed to sync annotation %s: %s", ann.name, e)
 
