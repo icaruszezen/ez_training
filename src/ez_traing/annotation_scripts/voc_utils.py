@@ -5,6 +5,7 @@
 """
 
 import os
+import tempfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Callable, List, Tuple
@@ -122,7 +123,16 @@ def save_voc(
         ET.indent(tree, space="    ")
     except AttributeError:
         pass
-    tree.write(xml_path, encoding="utf-8", xml_declaration=True)
+
+    xml_dir = str(Path(xml_path).parent)
+    fd, tmp = tempfile.mkstemp(dir=xml_dir, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            tree.write(f, encoding="utf-8", xml_declaration=True)
+        Path(tmp).replace(xml_path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
 
     return xml_path, new_count
 
@@ -163,12 +173,18 @@ def run_annotation(
     total = 0
     annotated = 0
 
+    failed = 0
     base = Path(dataset_dir)
     for i, img_file in enumerate(image_files, 1):
         rel = img_file.relative_to(base)
         print(f"[{i}/{len(image_files)}] {rel}")
 
-        bars, width, height = detect_fn(str(img_file))
+        try:
+            bars, width, height = detect_fn(str(img_file))
+        except Exception as e:
+            print(f"  处理失败: {e}")
+            failed += 1
+            continue
 
         if bars:
             xml_path, new_count = save_voc(str(img_file), label, bars, width, height)
@@ -181,4 +197,7 @@ def run_annotation(
         else:
             print(f"  未检测到{item_name}")
 
-    print(f"\n处理完成: {annotated}/{len(image_files)} 张图片有{item_name}，共 {total} 条")
+    summary = f"\n处理完成: {annotated}/{len(image_files)} 张图片有{item_name}，共 {total} 条"
+    if failed:
+        summary += f"，{failed} 张处理失败"
+    print(summary)

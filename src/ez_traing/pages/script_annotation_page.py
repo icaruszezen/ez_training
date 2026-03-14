@@ -2,12 +2,14 @@
 
 import os
 import re
+import subprocess
 import sys
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
 
-from PyQt5.QtCore import QProcess, Qt
+from PyQt5.QtCore import QProcess, QTimer, Qt
 from PyQt5.QtGui import QFont, QTextCursor
 from PyQt5.QtWidgets import (
     QHBoxLayout,
@@ -37,13 +39,22 @@ from qfluentwidgets import (
 class ScriptAnnotationPage(QWidget):
     """标注脚本管理页面。"""
 
-    _SCRIPT_TEMPLATE = '''"""自定义标注脚本模板。"""
+    _SCRIPT_TEMPLATE = '''"""自定义标注脚本模板。
+
+可用工具函数（位于 ez_traing.annotation_scripts.voc_utils）：
+  - run_annotation(dataset_dir, label, detect_fn) — 通用"扫描→检测→保存"标注骨架
+  - save_voc(image_path, label, bars, width, height) — 保存/合并 VOC XML
+  - read_existing_objects(xml_path) — 读取已有 VOC 标注
+"""
 
 import argparse
+from typing import List, Optional
 
 
-def run(dataset_dir: str) -> None:
+def run(dataset_dir: str, extra_dirs: Optional[List[str]] = None) -> None:
     print(f"开始处理数据集: {dataset_dir}")
+    if extra_dirs:
+        print(f"额外目录: {extra_dirs}")
     # TODO: 在此处编写你的标注逻辑
     print("处理完成")
 
@@ -51,8 +62,10 @@ def run(dataset_dir: str) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="自定义标注脚本")
     parser.add_argument("--dataset_dir", required=True, help="数据集目录")
+    parser.add_argument("--extra_dirs", nargs="*", default=[],
+                        help="额外数据集目录（归档模式下自动传入）")
     args = parser.parse_args()
-    run(args.dataset_dir)
+    run(args.dataset_dir, args.extra_dirs or None)
 
 
 if __name__ == "__main__":
@@ -70,6 +83,13 @@ if __name__ == "__main__":
         self._is_dirty = False
 
         self._process: Optional[QProcess] = None
+        self._stdout_buffer = ""
+        self._stderr_buffer = ""
+
+        self._timeout_timer = QTimer(self)
+        self._timeout_timer.setSingleShot(True)
+        self._timeout_timer.setInterval(30 * 60 * 1000)
+        self._timeout_timer.timeout.connect(self._on_timeout)
 
         self._setup_ui()
         self._ensure_script_dir()
@@ -131,6 +151,14 @@ if __name__ == "__main__":
         self.script_dir_label = CaptionLabel("", card)
         self.script_dir_label.setWordWrap(True)
         layout.addWidget(self.script_dir_label)
+
+        hint = CaptionLabel(
+            "提示：脚本需通过 argparse 接收 --dataset_dir 参数。"
+            "脚本以当前用户权限运行，请勿运行不可信脚本。",
+            card,
+        )
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
 
         self.script_list = QListWidget(card)
         self.script_list.setMinimumHeight(160)
@@ -423,7 +451,17 @@ if __name__ == "__main__":
             return
 
         try:
-            self._current_script_path.write_text(self.script_editor.toPlainText(), encoding="utf-8")
+            content = self.script_editor.toPlainText()
+            fd, tmp = tempfile.mkstemp(
+                dir=str(self._current_script_path.parent), suffix=".tmp",
+            )
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    f.write(content)
+                Path(tmp).replace(self._current_script_path)
+            except BaseException:
+                Path(tmp).unlink(missing_ok=True)
+                raise
         except OSError as e:
             self._show_error("保存失败", str(e))
             return
@@ -545,6 +583,8 @@ if __name__ == "__main__":
         process.finished.connect(self._on_process_finished)
 
         self._process = process
+        self._stdout_buffer = ""
+        self._stderr_buffer = ""
         self._set_running_state(True)
 
         self._append_log("=" * 50)
@@ -562,6 +602,8 @@ if __name__ == "__main__":
             self._process = None
             return
 
+        self._timeout_timer.start()
+
         InfoBar.success(
             title="已启动",
             content="脚本正在后台运行",
@@ -573,35 +615,62 @@ if __name__ == "__main__":
     def _on_stop_script(self) -> None:
         if self._process is None or self._process.state() == QProcess.NotRunning:
             return
+        self._timeout_timer.stop()
+        pid = self._process.processId()
         self._append_log("收到停止请求，正在终止进程...")
-        self._process.terminate()
-        if not self._process.waitForFinished(3000):
-            self._append_log("进程未在超时内退出，执行强制结束", level="warning")
-            self._process.kill()
+
+        if sys.platform == "win32" and pid:
+            subprocess.run(
+                ["taskkill", "/T", "/F", "/PID", str(pid)],
+                capture_output=True,
+            )
+            if not self._process.waitForFinished(3000):
+                self._process.kill()
+        else:
+            self._process.terminate()
+            if not self._process.waitForFinished(3000):
+                self._append_log("进程未在超时内退出，执行强制结束", level="warning")
+                self._process.kill()
 
     def _on_process_stdout(self) -> None:
         if self._process is None:
             return
         text = bytes(self._process.readAllStandardOutput()).decode("utf-8", errors="replace")
-        self._append_stream_text(text, level="info")
+        self._stdout_buffer = self._append_stream_text(
+            self._stdout_buffer + text, level="info",
+        )
 
     def _on_process_stderr(self) -> None:
         if self._process is None:
             return
         text = bytes(self._process.readAllStandardError()).decode("utf-8", errors="replace")
-        self._append_stream_text(text, level="error")
+        self._stderr_buffer = self._append_stream_text(
+            self._stderr_buffer + text, level="error",
+        )
 
-    def _append_stream_text(self, text: str, level: str = "info") -> None:
+    def _append_stream_text(self, text: str, level: str = "info") -> str:
+        """处理流式文本，返回尚未换行的剩余内容（行缓冲）。"""
         text = text.replace("\r\n", "\n").replace("\r", "\n")
-        for line in text.split("\n"):
-            if line.strip():
-                self._append_log(line, level=level)
+        if "\n" not in text:
+            return text
+        parts = text.split("\n")
+        for line in parts[:-1]:
+            self._append_log(line, level=level)
+        return parts[-1]
 
     def _on_process_error(self, error) -> None:
         self._append_log(f"进程错误: {error}", level="error")
 
     def _on_process_finished(self, exit_code: int, exit_status) -> None:
+        self._timeout_timer.stop()
         self._set_running_state(False)
+
+        if self._stdout_buffer:
+            self._append_log(self._stdout_buffer, level="info")
+            self._stdout_buffer = ""
+        if self._stderr_buffer:
+            self._append_log(self._stderr_buffer, level="error")
+            self._stderr_buffer = ""
 
         if exit_status == QProcess.NormalExit and exit_code == 0:
             self._append_log("脚本运行完成，退出码 0")
@@ -627,6 +696,14 @@ if __name__ == "__main__":
 
         self._append_log("=" * 50)
         self._process = None
+
+    def _on_timeout(self) -> None:
+        if self._process is None or self._process.state() == QProcess.NotRunning:
+            return
+        self._append_log(
+            "脚本运行超时（30 分钟），正在终止进程...", level="warning",
+        )
+        self._on_stop_script()
 
     def _set_running_state(self, running: bool) -> None:
         self.run_btn.setEnabled(not running)

@@ -3,9 +3,11 @@ YOLO 训练页面
 功能：训练配置、启动/停止、日志显示、权重管理
 """
 
+import gc
 import os
 import re
 import sys
+import threading
 import yaml
 from pathlib import Path
 from typing import Optional, List
@@ -75,34 +77,28 @@ class YoloTrainThread(QThread):
         self.device = device
         self.project_dir = project_dir
         self.name = name
-        self._stop_requested = False
+        self._stop_event = threading.Event()
         self._trainer = None
     
     def run(self):
         try:
             self.log_signal.emit(f"[INFO] 开始加载模型: {self.model}")
             
-            # 导入 ultralytics
             from ultralytics import YOLO
-            from ultralytics.utils import callbacks
             
-            # 加载模型
             model = YOLO(self.model)
             
-            # 添加自定义回调来捕获日志
             def on_train_epoch_end(trainer):
                 epoch = trainer.epoch + 1
                 epochs = trainer.epochs
                 self.progress_signal.emit(epoch, epochs)
-                metrics = trainer.metrics
-                loss = trainer.loss if hasattr(trainer, 'loss') else 0
-                self.log_signal.emit(f"[Epoch {epoch}/{epochs}] loss: {loss:.4f}")
+                loss_val = trainer.tloss.item() if trainer.tloss is not None else 0.0
+                self.log_signal.emit(f"[Epoch {epoch}/{epochs}] loss: {loss_val:.4f}")
             
             def on_train_batch_end(trainer):
-                if self._stop_requested:
+                if self._stop_event.is_set():
                     trainer.stop = True
             
-            # 注册回调
             model.add_callback("on_train_epoch_end", on_train_epoch_end)
             model.add_callback("on_train_batch_end", on_train_batch_end)
             
@@ -111,7 +107,6 @@ class YoloTrainThread(QThread):
             self.log_signal.emit(f"[INFO] 输出目录: {self.project_dir}")
             self.log_signal.emit("-" * 50)
             
-            # 开始训练
             results = model.train(
                 data=self.data_yaml,
                 epochs=self.epochs,
@@ -124,9 +119,9 @@ class YoloTrainThread(QThread):
                 verbose=True,
             )
             
-            if self._stop_requested:
+            if self._stop_event.is_set():
                 self.log_signal.emit("[INFO] 训练已被用户停止")
-                self.finished_signal.emit(False, "训练已停止")
+                self.finished_signal.emit(False, "USER_CANCELLED:训练已停止")
             else:
                 save_dir = str(results.save_dir) if hasattr(results, 'save_dir') else self.project_dir
                 self.log_signal.emit(f"[INFO] 训练完成！结果保存在: {save_dir}")
@@ -136,10 +131,18 @@ class YoloTrainThread(QThread):
             error_msg = str(e)
             self.log_signal.emit(f"[ERROR] 训练失败: {error_msg}")
             self.finished_signal.emit(False, error_msg)
+        finally:
+            gc.collect()
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except Exception:
+                pass
     
     def stop(self):
         """请求停止训练"""
-        self._stop_requested = True
+        self._stop_event.set()
         self.log_signal.emit("[INFO] 正在停止训练...")
 
 
@@ -318,6 +321,31 @@ class ConfigPanel(CardWidget):
                 position=InfoBarPosition.TOP,
             )
             return
+
+        imgsz = self.imgsz_spin.value()
+        if imgsz % 32 != 0:
+            InfoBar.warning(
+                title="提示",
+                content="Image Size 必须是 32 的倍数",
+                parent=self.window(),
+                position=InfoBarPosition.TOP,
+            )
+            return
+
+        output_dir = Path(self._output_dir)
+        try:
+            output_dir.mkdir(parents=True, exist_ok=True)
+            test_file = output_dir / ".write_test"
+            test_file.touch()
+            test_file.unlink()
+        except OSError as e:
+            InfoBar.error(
+                title="错误",
+                content=f"输出目录不可写: {e}",
+                parent=self.window(),
+                position=InfoBarPosition.TOP,
+            )
+            return
         
         train_name = re.sub(r"[^\w\-]+", "_", train_dir.name).strip("_") or "train_dataset"
         config = {
@@ -326,7 +354,7 @@ class ConfigPanel(CardWidget):
             "model": self.model_combo.currentText(),
             "epochs": self.epochs_spin.value(),
             "batch_size": self.batch_spin.value(),
-            "imgsz": self.imgsz_spin.value(),
+            "imgsz": imgsz,
             "device": self.device_combo.currentData(),
             "output_dir": self._output_dir,
         }
@@ -353,6 +381,8 @@ class ConfigPanel(CardWidget):
 
 class LogPanel(CardWidget):
     """日志显示面板"""
+
+    MAX_LOG_LINES = 5000
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -414,11 +444,28 @@ class LogPanel(CardWidget):
         if not self._log_buffer:
             self._log_flush_timer.stop()
             return
+
+        scrollbar = self.log_text.verticalScrollBar()
+        at_bottom = scrollbar.value() >= scrollbar.maximum() - 10
+
         self.log_text.appendPlainText("\n".join(self._log_buffer))
         self._log_buffer.clear()
-        cursor = self.log_text.textCursor()
-        cursor.movePosition(QTextCursor.End)
-        self.log_text.setTextCursor(cursor)
+
+        doc = self.log_text.document()
+        if doc.blockCount() > self.MAX_LOG_LINES:
+            cursor = QTextCursor(doc)
+            cursor.movePosition(QTextCursor.Start)
+            cursor.movePosition(
+                QTextCursor.Down, QTextCursor.KeepAnchor,
+                doc.blockCount() - self.MAX_LOG_LINES,
+            )
+            cursor.removeSelectedText()
+
+        if at_bottom:
+            cursor = self.log_text.textCursor()
+            cursor.movePosition(QTextCursor.End)
+            self.log_text.setTextCursor(cursor)
+
         self._log_flush_timer.stop()
     
     def set_progress(self, current: int, total: int):
@@ -642,6 +689,11 @@ class TrainPage(QWidget):
             missing_text = ", ".join(missing_keys)
             raise ValueError(f"data.yaml 缺少必要字段: {missing_text}")
 
+        for key in ("train", "val"):
+            sub_path = dataset_dir / data_config[key]
+            if not sub_path.exists():
+                raise ValueError(f"data.yaml 中 {key} 路径不存在: {sub_path}")
+
         return str(yaml_path)
     
     def _start_training(self, config: dict):
@@ -674,11 +726,11 @@ class TrainPage(QWidget):
             self._train_thread.progress_signal.connect(self.log_panel.set_progress)
             self._train_thread.finished_signal.connect(self._on_training_finished)
             
-            # 更新 UI 状态
+            self.weight_panel.set_runs_dir(config["output_dir"])
+
             self.config_panel.set_training_state(True)
             self.status_label.setText("训练中...")
             
-            # 启动训练
             self._train_thread.start()
             
         except Exception as e:
@@ -698,6 +750,10 @@ class TrainPage(QWidget):
     def _on_training_finished(self, success: bool, result: str):
         """训练完成回调"""
         self.config_panel.set_training_state(False)
+
+        if self._train_thread is not None:
+            self._train_thread.wait(5000)
+            self._train_thread.deleteLater()
         
         if success:
             self.status_label.setText("训练完成")
@@ -709,6 +765,15 @@ class TrainPage(QWidget):
                 position=InfoBarPosition.TOP,
                 duration=5000,
             )
+        elif result.startswith("USER_CANCELLED:"):
+            display_msg = result.split(":", 1)[1]
+            self.status_label.setText("训练已停止")
+            InfoBar.warning(
+                title="训练已停止",
+                content=display_msg,
+                parent=self.window(),
+                position=InfoBarPosition.TOP,
+            )
         else:
             self.status_label.setText("训练失败")
             InfoBar.error(
@@ -719,3 +784,9 @@ class TrainPage(QWidget):
             )
         
         self._train_thread = None
+
+    def cleanup(self):
+        """停止训练线程并等待其退出，应在页面/窗口关闭时调用"""
+        if self._train_thread and self._train_thread.isRunning():
+            self._train_thread.stop()
+            self._train_thread.wait(10000)
