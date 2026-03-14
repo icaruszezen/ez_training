@@ -2,10 +2,23 @@
 
 import csv
 import json
+import math
+from datetime import datetime
 from pathlib import Path
-from typing import Dict
+from typing import Any, Dict
 
 from ez_traing.evaluation.models import EvalConfig, EvalResult
+
+
+def _round_floats(obj: Any, precision: int = 6) -> Any:
+    """Recursively round floats to consistent precision for JSON output."""
+    if isinstance(obj, float):
+        return 0.0 if not math.isfinite(obj) else round(obj, precision)
+    if isinstance(obj, dict):
+        return {k: _round_floats(v, precision) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_round_floats(item, precision) for item in obj]
+    return obj
 
 
 def export_reports(result: EvalResult, config: EvalConfig, output_dir: str) -> Dict[str, str]:
@@ -16,10 +29,15 @@ def export_reports(result: EvalResult, config: EvalConfig, output_dir: str) -> D
     metrics_json = root / "metrics.json"
     metrics_csv = root / "metrics.csv"
 
-    payload = {
+    if metrics_json.exists() or metrics_csv.exists():
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        metrics_json = root / f"metrics_{ts}.json"
+        metrics_csv = root / f"metrics_{ts}.csv"
+
+    payload = _round_floats({
         "config": config.to_dict(),
         "result": result.to_dict(),
-    }
+    })
     with open(metrics_json, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
 
@@ -32,7 +50,6 @@ def export_reports(result: EvalResult, config: EvalConfig, output_dir: str) -> D
             writer.writerow(["Precision", f"{result.metrics.precision:.6f}"])
             writer.writerow(["Recall", f"{result.metrics.recall:.6f}"])
             writer.writerow(["F1", f"{result.metrics.f1:.6f}"])
-        writer.writerow([])
         writer.writerow(["save_dir", result.save_dir])
         writer.writerow(["message", result.message])
 

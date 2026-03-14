@@ -62,15 +62,12 @@ class YoloEvalThread(QThread):
         self._stop_requested = False
 
     def run(self):
-        if self._stop_requested:
-            self.finished_signal.emit(EvalResult(success=False, message="验证已取消"))
-            return
-
         engine = EvaluationEngine()
         result = engine.run(
             self.config,
             log_callback=self.log_signal.emit,
             progress_callback=self.progress_signal.emit,
+            cancel_check=lambda: self._stop_requested,
         )
         self.finished_signal.emit(result)
 
@@ -558,6 +555,8 @@ class EvalResultPanel(CardWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._save_dir = ""
+        self._dataset_name = ""
+        self._model_path = ""
         self._chart_labels: Dict[str, QLabel] = {}
         self._init_ui()
 
@@ -626,8 +625,11 @@ class EvalResultPanel(CardWidget):
         self.chart_scroll.setWidget(self.chart_container)
         layout.addWidget(self.chart_scroll, 1)
 
-    def set_result(self, result: EvalResult):
+    def set_result(self, result: EvalResult, config: Optional[EvalConfig] = None):
         self._save_dir = result.save_dir or ""
+        if config:
+            self._dataset_name = config.dataset_name
+            self._model_path = config.model_path
         self.open_dir_btn.setEnabled(bool(self._save_dir))
         self.export_btn.setEnabled(result.success)
         self.export_to_btn.setEnabled(result.success)
@@ -681,6 +683,8 @@ class EvalResultPanel(CardWidget):
 
     def clear_result(self):
         self._save_dir = ""
+        self._dataset_name = ""
+        self._model_path = ""
         self.open_dir_btn.setEnabled(False)
         self.export_btn.setEnabled(False)
         self.export_to_btn.setEnabled(False)
@@ -690,13 +694,19 @@ class EvalResultPanel(CardWidget):
         self._set_charts({})
 
     def metrics_text(self) -> str:
-        return (
+        lines = []
+        if self._dataset_name:
+            lines.append(f"数据集: {self._dataset_name}")
+        if self._model_path:
+            lines.append(f"模型: {self._model_path}")
+        lines.append(
             f"mAP50={self.metric_labels['mAP50'].text()}, "
             f"mAP50-95={self.metric_labels['mAP50-95'].text()}, "
             f"Precision={self.metric_labels['Precision'].text()}, "
             f"Recall={self.metric_labels['Recall'].text()}, "
             f"F1={self.metric_labels['F1'].text()}"
         )
+        return "\n".join(lines)
 
 
 class EvalPage(QWidget):
@@ -801,7 +811,7 @@ class EvalPage(QWidget):
         if result.success:
             self.status_label.setText("验证完成")
             self.log_panel.append_log("[INFO] 验证成功，准备展示结果...")
-            self.result_panel.set_result(result)
+            self.result_panel.set_result(result, self._last_config)
             self._export_reports(auto=True)
             InfoBar.success(
                 title="验证完成",
@@ -820,7 +830,10 @@ class EvalPage(QWidget):
                 position=InfoBarPosition.TOP,
             )
 
+        thread = self._eval_thread
         self._eval_thread = None
+        if thread is not None and thread.isRunning():
+            thread.wait(2000)
 
     def _export_reports(self, auto: bool = False):
         if not self._last_result or not self._last_result.success or not self._last_config:
