@@ -1,12 +1,14 @@
 import json
+import logging
 import os
 import re
-import sys
 import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
-SUPPORTED_IMAGE_FORMATS = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp", ".tiff", ".tif"}
+logger = logging.getLogger(__name__)
+
+SUPPORTED_IMAGE_FORMATS = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp", ".tiff", ".tif", ".avif"}
 
 _ANSI_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 
@@ -33,8 +35,8 @@ def load_settings() -> Dict[str, Any]:
         try:
             with open(path, "r", encoding="utf-8") as f:
                 settings.update(json.load(f))
-        except (json.JSONDecodeError, OSError):
-            pass
+        except (json.JSONDecodeError, OSError) as exc:
+            logger.warning("Failed to load %s, falling back to defaults: %s", path, exc)
     return settings
 
 
@@ -67,8 +69,8 @@ def get_github_mirror_prefix() -> str:
 
 
 def detect_devices() -> List[Tuple[str, str]]:
-    """Return ``[(device_id, display_name), ...]`` for CPU and available GPUs."""
-    devices: List[Tuple[str, str]] = [("cpu", "CPU")]
+    """Return ``[(device_id, display_name), ...]`` for available GPUs then CPU."""
+    devices: List[Tuple[str, str]] = []
     try:
         import torch
 
@@ -77,9 +79,12 @@ def detect_devices() -> List[Tuple[str, str]]:
                 name = torch.cuda.get_device_name(i)
                 props = torch.cuda.get_device_properties(i)
                 memory_gb = props.total_memory / (1024 ** 3)
-                devices.insert(0, (str(i), f"GPU {i}: {name} ({memory_gb:.1f}GB)"))
+                devices.append((str(i), f"GPU {i}: {name} ({memory_gb:.1f}GB)"))
+        if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            devices.append(("mps", "MPS (Apple Silicon)"))
     except Exception:
         pass
+    devices.append(("cpu", "CPU"))
     return devices
 
 
