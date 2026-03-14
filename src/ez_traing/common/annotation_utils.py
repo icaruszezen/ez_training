@@ -1,9 +1,10 @@
 """Shared annotation parsing utilities for YOLO and VOC formats."""
 
 import logging
-import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Dict, List, Optional
+
+from ez_traing.common.voc_io import parse_voc_objects
 
 logger = logging.getLogger(__name__)
 
@@ -35,22 +36,16 @@ def parse_yolo_labels(txt_path: Path, class_names: List[str]) -> List[str]:
 
 def parse_voc_labels(xml_path: Path) -> List[str]:
     """Parse a VOC XML annotation file and return label names."""
-    labels: List[str] = []
-    try:
-        tree = ET.parse(xml_path)
-        for obj in tree.getroot().findall("object"):
-            name = obj.find("name")
-            if name is not None and name.text:
-                labels.append(name.text)
-    except Exception:
-        logger.debug("Failed to parse VOC annotation: %s", xml_path)
-    return labels
+    return [o.label for o in parse_voc_objects(xml_path)]
 
 
 def read_yolo_boxes(
     txt_path: Path, img_w: int, img_h: int, class_names: List[str],
 ) -> List[Dict[str, object]]:
     """Parse a YOLO annotation file and return bounding boxes.
+
+    Coordinates are clamped to ``[0, img_w]`` / ``[0, img_h]`` and
+    degenerate boxes (width or height <= 0) are skipped.
 
     Returns list of ``{"label": str, "xmin": int, "ymin": int,
     "xmax": int, "ymax": int}``.
@@ -64,22 +59,28 @@ def read_yolo_boxes(
                     continue
                 try:
                     class_id = int(parts[0])
-                except ValueError:
+                    cx = float(parts[1]) * img_w
+                    cy = float(parts[2]) * img_h
+                    w = float(parts[3]) * img_w
+                    h = float(parts[4]) * img_h
+                except (ValueError, IndexError):
                     continue
-                cx = float(parts[1]) * img_w
-                cy = float(parts[2]) * img_h
-                w = float(parts[3]) * img_w
-                h = float(parts[4]) * img_h
                 if class_names and 0 <= class_id < len(class_names):
                     label = class_names[class_id]
                 else:
                     label = f"class_{class_id}"
+                xmin = max(0, round(cx - w / 2))
+                ymin = max(0, round(cy - h / 2))
+                xmax = min(img_w, round(cx + w / 2))
+                ymax = min(img_h, round(cy + h / 2))
+                if xmax <= xmin or ymax <= ymin:
+                    continue
                 boxes.append({
                     "label": label,
-                    "xmin": int(cx - w / 2),
-                    "ymin": int(cy - h / 2),
-                    "xmax": int(cx + w / 2),
-                    "ymax": int(cy + h / 2),
+                    "xmin": xmin,
+                    "ymin": ymin,
+                    "xmax": xmax,
+                    "ymax": ymax,
                 })
     except Exception:
         logger.debug("Failed to parse YOLO boxes: %s", txt_path)
@@ -92,24 +93,11 @@ def read_voc_boxes(xml_path: Path) -> List[Dict[str, object]]:
     Returns list of ``{"label": str, "xmin": int, "ymin": int,
     "xmax": int, "ymax": int}``.
     """
-    boxes: List[Dict[str, object]] = []
-    try:
-        tree = ET.parse(xml_path)
-        for obj in tree.getroot().findall("object"):
-            name = (obj.findtext("name") or "").strip()
-            bnd = obj.find("bndbox")
-            if not name or bnd is None:
-                continue
-            boxes.append({
-                "label": name,
-                "xmin": int(float((bnd.findtext("xmin") or "0").strip())),
-                "ymin": int(float((bnd.findtext("ymin") or "0").strip())),
-                "xmax": int(float((bnd.findtext("xmax") or "0").strip())),
-                "ymax": int(float((bnd.findtext("ymax") or "0").strip())),
-            })
-    except Exception:
-        logger.debug("Failed to parse VOC boxes: %s", xml_path)
-    return boxes
+    return [
+        {"label": o.label, "xmin": o.xmin, "ymin": o.ymin,
+         "xmax": o.xmax, "ymax": o.ymax}
+        for o in parse_voc_objects(xml_path)
+    ]
 
 
 def read_annotation_boxes(

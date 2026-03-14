@@ -68,7 +68,7 @@ class TestPrelabelingWorkerInit:
         assert worker._overwrite is False
 
     def test_not_cancelled_initially(self, worker):
-        assert worker._is_cancelled is False
+        assert worker._cancelled is False
 
     def test_custom_skip_annotated(self, sample_images, mock_vision_service):
         w = PrelabelingWorker(
@@ -143,12 +143,12 @@ class TestCancel:
 
     def test_sets_cancelled_flag(self, worker):
         worker.cancel()
-        assert worker._is_cancelled is True
+        assert worker._cancelled is True
 
     def test_cancel_idempotent(self, worker):
         worker.cancel()
         worker.cancel()
-        assert worker._is_cancelled is True
+        assert worker._cancelled is True
 
 
 class TestHasAnnotation:

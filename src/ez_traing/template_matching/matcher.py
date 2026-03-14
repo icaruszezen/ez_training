@@ -8,21 +8,12 @@ from typing import Any, Dict, List, Optional, Tuple
 import cv2
 import numpy as np
 
+from ez_traing.common.image_utils import imread_unicode
 from ez_traing.prelabeling.models import BoundingBox
 
 logger = logging.getLogger(__name__)
 
 _SQDIFF_METHODS = frozenset({cv2.TM_SQDIFF, cv2.TM_SQDIFF_NORMED})
-
-
-def imread_unicode(path: str, flags: int = cv2.IMREAD_COLOR) -> Optional[np.ndarray]:
-    """读取可能含非 ASCII（如中文）路径的图片，兼容 Windows。"""
-    try:
-        data = np.fromfile(path, dtype=np.uint8)
-        return cv2.imdecode(data, flags)
-    except Exception:
-        logger.warning("无法读取图片文件: %s", path, exc_info=True)
-        return None
 
 
 @dataclass

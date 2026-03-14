@@ -474,12 +474,19 @@ class _TestMatchWorker(QThread):
         self._tpl_info = tpl_info
         self._paths = paths
         self._primary_index = primary_index
+        self._cancelled = False
+
+    def cancel(self):
+        self._cancelled = True
 
     def run(self):
         for i, path in enumerate(self._paths):
+            if self._cancelled:
+                break
             result = self._matcher.match(path, [self._tpl_info])
             self.single_done.emit(path, result)
-        self.all_done.emit()
+        if not self._cancelled:
+            self.all_done.emit()
 
 
 # ======================================================================
@@ -1012,6 +1019,20 @@ class TemplateEditorDialog(QDialog):
 
     def _on_test_all_done(self):
         self._test_worker = None
+
+    def _stop_test_worker(self):
+        if self._test_worker and self._test_worker.isRunning():
+            self._test_worker.cancel()
+            self._test_worker.wait(3000)
+        self._test_worker = None
+
+    def closeEvent(self, event):
+        self._stop_test_worker()
+        super().closeEvent(event)
+
+    def reject(self):
+        self._stop_test_worker()
+        super().reject()
 
     def _show_test_image(self, path: str, boxes):
         img = imread_unicode(path)

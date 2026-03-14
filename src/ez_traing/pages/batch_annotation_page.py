@@ -123,36 +123,24 @@ def _read_existing_yolo_shapes(
     Returns None on parse error (caller should skip the image to avoid data loss).
     Returns [] when the annotation file does not exist.
     """
+    from ez_traing.common.annotation_utils import read_yolo_boxes
+
     if not os.path.exists(txt_path):
         return []
     try:
+        boxes = read_yolo_boxes(Path(txt_path), img_width, img_height, class_list)
         shapes = []
-        with open(txt_path, "r", encoding="utf-8") as f:
-            for line in f:
-                parts = line.strip().split()
-                if len(parts) < 5:
-                    continue
-                class_id = int(parts[0])
-                cx = float(parts[1]) * img_width
-                cy = float(parts[2]) * img_height
-                w = float(parts[3]) * img_width
-                h = float(parts[4]) * img_height
-                xmin = cx - w / 2
-                ymin = cy - h / 2
-                xmax = cx + w / 2
-                ymax = cy + h / 2
-                if class_id < len(class_list):
-                    label = class_list[class_id]
-                else:
-                    label = f"class_{class_id}"
-                shapes.append({
-                    "label": label,
-                    "points": [
-                        (xmin, ymin), (xmax, ymin),
-                        (xmax, ymax), (xmin, ymax),
-                    ],
-                    "difficult": False,
-                })
+        for b in boxes:
+            xmin, ymin = b["xmin"], b["ymin"]
+            xmax, ymax = b["xmax"], b["ymax"]
+            shapes.append({
+                "label": b["label"],
+                "points": [
+                    (xmin, ymin), (xmax, ymin),
+                    (xmax, ymax), (xmin, ymax),
+                ],
+                "difficult": False,
+            })
         return shapes
     except Exception as e:
         logger.warning("Failed to parse YOLO annotation %s: %s", txt_path, e)
@@ -180,9 +168,10 @@ class BatchApplyWorker(QThread):
         self._target_paths = target_paths
         self._label_format = label_format
         self._class_list = class_list
+        self._cancelled = False
 
     def cancel(self):
-        self.requestInterruption()
+        self._cancelled = True
 
     def run(self):
         applied = 0
@@ -200,7 +189,7 @@ class BatchApplyWorker(QThread):
             for s in self._shapes
         ]
         for i, path in enumerate(self._target_paths):
-            if self.isInterruptionRequested():
+            if self._cancelled:
                 break
             try:
                 img_size = _read_image_size(path)

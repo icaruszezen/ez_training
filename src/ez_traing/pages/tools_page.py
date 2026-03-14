@@ -246,6 +246,8 @@ class _YoloToVocWorker(QThread):
 
                 if xmax > xmin and ymax > ymin:
                     boxes.append((classes[cls_id], xmin, ymin, xmax, ymax))
+                else:
+                    skipped += 1
         return boxes, skipped
 
 

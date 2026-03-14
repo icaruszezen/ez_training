@@ -145,6 +145,8 @@ class YoloTrainThread(QThread):
         self._stop_event.set()
         self.log_signal.emit("[INFO] 正在停止训练...")
 
+    cancel = stop
+
 
 class ConfigPanel(CardWidget):
     """训练配置面板"""

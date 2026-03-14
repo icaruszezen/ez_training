@@ -6,6 +6,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
+from ez_traing.common.voc_io import parse_voc_size
 from ez_traing.data_prep.models import AnnotationBox, DatasetSample
 
 logger = logging.getLogger(__name__)
@@ -79,21 +80,7 @@ def find_voc_for_image(
 
 def read_voc_image_size(xml_path: Path) -> Optional[Tuple[int, int]]:
     """从 VOC XML 的 <size> 元素读取图片尺寸，返回 (width, height) 或 None。"""
-    try:
-        root = ET.parse(xml_path).getroot()
-    except Exception:
-        return None
-    size_elem = root.find("size")
-    if size_elem is None:
-        return None
-    try:
-        w = int((size_elem.findtext("width") or "0").strip())
-        h = int((size_elem.findtext("height") or "0").strip())
-    except (ValueError, TypeError):
-        return None
-    if w > 0 and h > 0:
-        return w, h
-    return None
+    return parse_voc_size(xml_path)
 
 
 def parse_voc_boxes(xml_path: Path, image_width: int, image_height: int) -> List[AnnotationBox]:

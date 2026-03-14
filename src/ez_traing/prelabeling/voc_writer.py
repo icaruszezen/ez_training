@@ -2,13 +2,13 @@
 
 import logging
 import threading
-import xml.etree.ElementTree as ET
 from collections import OrderedDict
 from pathlib import Path
 from typing import List, Optional, Tuple
 
 from PIL import Image
 
+from ez_traing.common.voc_io import parse_voc_objects
 from ez_traing.labeling.pascal_voc_io import PascalVocWriter
 from ez_traing.prelabeling.models import BoundingBox
 
@@ -98,11 +98,10 @@ class VOCAnnotationWriter:
 
     def read_annotation(self, xml_path: str) -> List[BoundingBox]:
         """读取已有 VOC 标注并转换为 BoundingBox 列表。"""
-        path = Path(xml_path)
+        path = Path(xml_path).resolve()
         if not path.exists():
             return []
 
-        path = path.resolve()
         try:
             mtime_ns = path.stat().st_mtime_ns
         except OSError:
@@ -114,31 +113,17 @@ class VOCAnnotationWriter:
             if cached is not None:
                 return list(cached)
 
-        root = ET.parse(path).getroot()
-        boxes: List[BoundingBox] = []
-        for obj in root.findall("object"):
-            name = (obj.findtext("name") or "").strip()
-            bnd = obj.find("bndbox")
-            if not name or bnd is None:
-                continue
-            try:
-                x_min = int(float((bnd.findtext("xmin") or "0").strip()))
-                y_min = int(float((bnd.findtext("ymin") or "0").strip()))
-                x_max = int(float((bnd.findtext("xmax") or "0").strip()))
-                y_max = int(float((bnd.findtext("ymax") or "0").strip()))
-            except ValueError:
-                continue
-
-            boxes.append(
-                BoundingBox(
-                    label=name,
-                    x_min=x_min,
-                    y_min=y_min,
-                    x_max=x_max,
-                    y_max=y_max,
-                    confidence=1.0,
-                )
+        boxes = [
+            BoundingBox(
+                label=o.label,
+                x_min=o.xmin,
+                y_min=o.ymin,
+                x_max=o.xmax,
+                y_max=o.ymax,
+                confidence=1.0,
             )
+            for o in parse_voc_objects(path)
+        ]
 
         with self._cache_lock:
             self._cache_put(self._annotation_cache, cache_key, boxes)

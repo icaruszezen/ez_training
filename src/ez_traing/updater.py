@@ -94,8 +94,17 @@ class CheckUpdateWorker(QThread):
     finished = pyqtSignal(object)  # ReleaseInfo | None
     error = pyqtSignal(str)
 
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._cancelled = False
+
+    def cancel(self):
+        self._cancelled = True
+
     def run(self):
         try:
+            if self._cancelled:
+                return
             api_url = _mirror_url(RELEASES_API)
             try:
                 resp = requests.get(
@@ -114,6 +123,8 @@ class CheckUpdateWorker(QThread):
                     resp.raise_for_status()
                 else:
                     raise
+            if self._cancelled:
+                return
             data = resp.json()
 
             tag = data.get("tag_name", "")
@@ -137,11 +148,14 @@ class CheckUpdateWorker(QThread):
                 size=asset.get("size", 0),
                 sha256=sha256,
             )
-            self.finished.emit(info)
+            if not self._cancelled:
+                self.finished.emit(info)
         except requests.RequestException as exc:
-            self.error.emit(f"网络请求失败: {exc}")
+            if not self._cancelled:
+                self.error.emit(f"网络请求失败: {exc}")
         except Exception as exc:
-            self.error.emit(str(exc))
+            if not self._cancelled:
+                self.error.emit(str(exc))
 
     @staticmethod
     def _find_zip_asset(assets: list) -> Optional[dict]:

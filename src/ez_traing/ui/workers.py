@@ -23,11 +23,11 @@ class ThumbnailLoader(QThread):
         super().__init__()
         self.image_paths = image_paths
         self.thumbnail_size = thumbnail_size
-        self._is_cancelled = False
+        self._cancelled = False
 
     def run(self):
         for path in self.image_paths:
-            if self._is_cancelled:
+            if self._cancelled:
                 break
             try:
                 reader = QImageReader(path)
@@ -44,13 +44,11 @@ class ThumbnailLoader(QThread):
                     self.thumbnail_loaded.emit(path, image)
             except Exception:
                 logger.debug("Failed to load thumbnail: %s", path, exc_info=True)
-        if not self._is_cancelled:
+        if not self._cancelled:
             self.all_loaded.emit()
 
     def cancel(self):
-        self._is_cancelled = True
-        if self.isRunning():
-            self.wait(3000)
+        self._cancelled = True
 
 
 class ImageScanWorker(QThread):

@@ -76,6 +76,8 @@ class YoloEvalThread(QThread):
         self.requestInterruption()
         self.log_signal.emit("[INFO] 已请求停止，当前轮次结束后退出。")
 
+    cancel = stop
+
 
 class ClickableImageLabel(QLabel):
     """可点击图片标签。"""

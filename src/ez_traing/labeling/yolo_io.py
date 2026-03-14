@@ -1,6 +1,9 @@
+import logging
 import os
 
 from ez_traing.labeling.constants import DEFAULT_ENCODING
+
+logger = logging.getLogger(__name__)
 
 TXT_EXT = '.txt'
 ENCODE_METHOD = DEFAULT_ENCODING
@@ -97,11 +100,14 @@ class YoloReader:
 
     def yolo_line_to_shape(self, class_index, x_center, y_center, w, h):
         idx = int(class_index)
-        if idx < 0 or idx >= len(self.classes):
-            raise ValueError(
-                f"class_index {idx} out of range (classes.txt has {len(self.classes)} entries)"
+        if 0 <= idx < len(self.classes):
+            label = self.classes[idx]
+        else:
+            label = f"class_{idx}"
+            logger.warning(
+                "class_index %d out of range (classes.txt has %d entries), using '%s'",
+                idx, len(self.classes), label,
             )
-        label = self.classes[idx]
 
         x_min = max(float(x_center) - float(w) / 2, 0)
         x_max = min(float(x_center) + float(w) / 2, 1)
@@ -117,7 +123,25 @@ class YoloReader:
 
     def parse_yolo_format(self):
         with open(self.file_path, 'r', encoding=ENCODE_METHOD) as bnd_box_file:
-            for bndBox in bnd_box_file:
-                class_index, x_center, y_center, w, h = bndBox.strip().split(' ')
-                label, x_min, y_min, x_max, y_max = self.yolo_line_to_shape(class_index, x_center, y_center, w, h)
-                self.add_shape(label, x_min, y_min, x_max, y_max, False)
+            for line_no, raw_line in enumerate(bnd_box_file, 1):
+                line = raw_line.strip()
+                if not line:
+                    continue
+                parts = line.split()
+                if len(parts) < 5:
+                    logger.warning(
+                        "%s:%d: expected 5 fields, got %d – skipping",
+                        self.file_path, line_no, len(parts),
+                    )
+                    continue
+                try:
+                    class_index, x_center, y_center, w, h = parts[:5]
+                    label, x_min, y_min, x_max, y_max = self.yolo_line_to_shape(
+                        class_index, x_center, y_center, w, h,
+                    )
+                    self.add_shape(label, x_min, y_min, x_max, y_max, False)
+                except (ValueError, IndexError) as e:
+                    logger.warning(
+                        "%s:%d: failed to parse line – %s",
+                        self.file_path, line_no, e,
+                    )

@@ -4,84 +4,43 @@
 运行骨架，供各预标注脚本复用。
 """
 
+import logging
 import os
-import tempfile
-import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Callable, List, Tuple
 
 from ez_traing.common.constants import SUPPORTED_IMAGE_FORMATS
+from ez_traing.common.voc_io import (
+    VocObject,
+    append_voc_object,
+    create_voc_xml,
+    parse_voc_objects,
+    save_voc_xml,
+)
+
+logger = logging.getLogger(__name__)
 
 DetectResult = Tuple[List[Tuple[int, int, int, int]], int, int]
 
-
-# ---------------------------------------------------------------------------
-# VOC XML 读写
-# ---------------------------------------------------------------------------
-
-def create_voc_root(
-    folder: str, filename: str, path: str, width: int, height: int, depth: int,
-) -> ET.Element:
-    root = ET.Element("annotation")
-    ET.SubElement(root, "folder").text = folder
-    ET.SubElement(root, "filename").text = filename
-    ET.SubElement(root, "path").text = path
-
-    source = ET.SubElement(root, "source")
-    ET.SubElement(source, "database").text = "Unknown"
-
-    size_elem = ET.SubElement(root, "size")
-    ET.SubElement(size_elem, "width").text = str(width)
-    ET.SubElement(size_elem, "height").text = str(height)
-    ET.SubElement(size_elem, "depth").text = str(depth)
-
-    ET.SubElement(root, "segmented").text = "0"
-    return root
+# Re-export for backward compatibility
+create_voc_root = create_voc_xml
 
 
 def append_object(
-    root: ET.Element, label: str, xmin: int, ymin: int, xmax: int, ymax: int,
+    root, label: str, xmin: int, ymin: int, xmax: int, ymax: int,
 ) -> None:
-    obj = ET.SubElement(root, "object")
-    ET.SubElement(obj, "name").text = label
-    ET.SubElement(obj, "pose").text = "Unspecified"
-    ET.SubElement(obj, "truncated").text = "0"
-    ET.SubElement(obj, "difficult").text = "0"
-
-    bndbox = ET.SubElement(obj, "bndbox")
-    ET.SubElement(bndbox, "xmin").text = str(xmin)
-    ET.SubElement(bndbox, "ymin").text = str(ymin)
-    ET.SubElement(bndbox, "xmax").text = str(xmax)
-    ET.SubElement(bndbox, "ymax").text = str(ymax)
+    """Backward-compatible wrapper around :func:`append_voc_object`."""
+    append_voc_object(root, label, xmin, ymin, xmax, ymax)
 
 
 def read_existing_objects(
     xml_path: str,
 ) -> List[Tuple[str, int, int, int, int]]:
     """读取已有 VOC XML 中的所有目标框。"""
-    if not os.path.exists(xml_path):
-        return []
-    try:
-        root = ET.parse(xml_path).getroot()
-    except ET.ParseError:
-        print(f"  VOC 文件解析失败，将覆盖: {xml_path}")
-        return []
-
-    objects: List[Tuple[str, int, int, int, int]] = []
-    for obj_elem in root.findall("object"):
-        name = (obj_elem.findtext("name") or "").strip()
-        bnd = obj_elem.find("bndbox")
-        if not name or bnd is None:
-            continue
-        try:
-            xmin = int(float((bnd.findtext("xmin") or "0").strip()))
-            ymin = int(float((bnd.findtext("ymin") or "0").strip()))
-            xmax = int(float((bnd.findtext("xmax") or "0").strip()))
-            ymax = int(float((bnd.findtext("ymax") or "0").strip()))
-        except ValueError:
-            continue
-        objects.append((name, xmin, ymin, xmax, ymax))
-    return objects
+    return [
+        (o.label, o.xmin, o.ymin, o.xmax, o.ymax)
+        for o in parse_voc_objects(xml_path)
+    ]
 
 
 def save_voc(
@@ -101,39 +60,24 @@ def save_voc(
 
     existing_objects = read_existing_objects(xml_path)
 
-    root = create_voc_root(folder, filename, str(img_path), width, height, depth)
+    root = create_voc_xml(folder, filename, str(img_path), width, height, depth)
 
     added_keys: set = set()
     for name, xmin, ymin, xmax, ymax in existing_objects:
         key = (name, xmin, ymin, xmax, ymax)
         if key not in added_keys:
-            append_object(root, name, xmin, ymin, xmax, ymax)
+            append_voc_object(root, name, xmin, ymin, xmax, ymax)
             added_keys.add(key)
 
     new_count = 0
     for xmin, ymin, xmax, ymax in bars:
         key = (label, xmin, ymin, xmax, ymax)
         if key not in added_keys:
-            append_object(root, label, xmin, ymin, xmax, ymax)
+            append_voc_object(root, label, xmin, ymin, xmax, ymax)
             added_keys.add(key)
             new_count += 1
 
-    tree = ET.ElementTree(root)
-    try:
-        ET.indent(tree, space="    ")
-    except AttributeError:
-        pass
-
-    xml_dir = str(Path(xml_path).parent)
-    fd, tmp = tempfile.mkstemp(dir=xml_dir, suffix=".tmp")
-    try:
-        with os.fdopen(fd, "wb") as f:
-            tree.write(f, encoding="utf-8", xml_declaration=True)
-        Path(tmp).replace(xml_path)
-    except BaseException:
-        Path(tmp).unlink(missing_ok=True)
-        raise
-
+    save_voc_xml(root, xml_path)
     return xml_path, new_count
 
 

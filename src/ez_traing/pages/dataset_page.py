@@ -539,7 +539,7 @@ class ImageScanner(QThread):
         self.directory = self._directories[0] if self._directories else ""
         self.classes_file = classes_file
         self.recursive = recursive
-        self._is_cancelled = False
+        self._cancelled = False
         self._class_names: List[str] = []
     
     def _load_classes(self):
@@ -571,14 +571,14 @@ class ImageScanner(QThread):
         self._load_classes()
         
         for directory in self._directories:
-            if self._is_cancelled:
+            if self._cancelled:
                 break
             if not os.path.isdir(directory):
                 continue
             try:
                 if self.recursive:
                     for root, _, files in os.walk(directory):
-                        if self._is_cancelled:
+                        if self._cancelled:
                             break
                         for file in files:
                             if Path(file).suffix.lower() in SUPPORTED_IMAGE_FORMATS:
@@ -595,7 +595,7 @@ class ImageScanner(QThread):
         stats.total_images = total
         
         for i, file_path in enumerate(all_files):
-            if self._is_cancelled:
+            if self._cancelled:
                 break
             
             path = Path(file_path)
@@ -635,7 +635,7 @@ class ImageScanner(QThread):
         self.finished.emit(image_infos, stats)
     
     def cancel(self):
-        self._is_cancelled = True
+        self._cancelled = True
 
 
 class ProjectListWidget(CardWidget):
@@ -1021,33 +1021,33 @@ class _AnnotatedPreviewWorker(QThread):
         self._class_names = list(class_names)
         self._target_w = target_w
         self._target_h = target_h
-        self._is_cancelled = False
+        self._cancelled = False
 
     def cancel(self):
-        self._is_cancelled = True
+        self._cancelled = True
 
     def run(self):
-        if self._is_cancelled:
+        if self._cancelled:
             return
         reader = QImageReader(self._image_path)
         reader.setAutoTransform(True)
         orig_size = reader.size()
-        if not orig_size.isValid() or self._is_cancelled:
+        if not orig_size.isValid() or self._cancelled:
             return
 
         img_w, img_h = orig_size.width(), orig_size.height()
         annotations = read_annotation_boxes(
             self._image_path, img_w, img_h, self._class_names,
         )
-        if self._is_cancelled:
+        if self._cancelled:
             return
 
         if annotations:
             image = reader.read()
-            if image.isNull() or self._is_cancelled:
+            if image.isNull() or self._cancelled:
                 return
             self._draw_on_image(image, annotations)
-            if self._is_cancelled:
+            if self._cancelled:
                 return
             result = image.scaled(self._target_w, self._target_h,
                                   Qt.KeepAspectRatio, Qt.SmoothTransformation)
@@ -1059,7 +1059,7 @@ class _AnnotatedPreviewWorker(QThread):
             if result.isNull():
                 return
 
-        if not self._is_cancelled:
+        if not self._cancelled:
             self.finished.emit(self._image_path, result)
 
     def _draw_on_image(self, image: QImage, annotations: List[dict]):

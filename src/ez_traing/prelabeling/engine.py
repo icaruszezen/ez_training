@@ -116,7 +116,7 @@ class PrelabelingWorker(QThread):
         self._inference_backend = InferenceBackend(inference_backend)
         self._skip_annotated = skip_annotated
         self._overwrite = overwrite
-        self._is_cancelled = False
+        self._cancelled = False
         self._voc_writer = VOCAnnotationWriter()
         self._max_workers = max(1, max_workers)
         self._rate_lock = threading.Lock()
@@ -161,7 +161,7 @@ class PrelabelingWorker(QThread):
 
     def _run_sequential(self, stats: PrelabelingStats) -> None:
         for i, image_path in enumerate(self._image_paths):
-            if self._is_cancelled:
+            if self._cancelled:
                 logger.info("预标注已被用户取消")
                 break
             self._process_one(image_path, i, stats)
@@ -174,7 +174,7 @@ class PrelabelingWorker(QThread):
         lock = threading.Lock()
 
         def _worker(image_path: str, index: int):
-            if self._is_cancelled:
+            if self._cancelled:
                 return
             with self._rate_lock:
                 time.sleep(self.REQUEST_INTERVAL_SEC)
@@ -186,13 +186,20 @@ class PrelabelingWorker(QThread):
                 for i, path in enumerate(self._image_paths)
             }
             for future in as_completed(futures):
-                if self._is_cancelled:
+                if self._cancelled:
                     executor.shutdown(wait=True, cancel_futures=True)
                     break
                 try:
                     future.result()
                 except Exception:
-                    logger.exception("处理图片时发生未预期的异常")
+                    image_path = futures[future]
+                    logger.exception("处理图片时发生未预期的异常: %s", image_path)
+                    with lock:
+                        stats.processed += 1
+                        stats.failed += 1
+                    self.image_completed.emit(
+                        image_path, False, f"处理异常: {Path(image_path).name}"
+                    )
 
     # ------------------------------------------------------------------
     # Single image processing (thread-safe)
@@ -202,7 +209,7 @@ class PrelabelingWorker(QThread):
                      stats: PrelabelingStats,
                      lock: threading.Lock = None) -> None:
         """处理单张图片，线程安全"""
-        if self._is_cancelled:
+        if self._cancelled:
             return
 
         def _update_stats(attr: str):
@@ -276,7 +283,7 @@ class PrelabelingWorker(QThread):
 
     def cancel(self) -> None:
         """取消批量处理"""
-        self._is_cancelled = True
+        self._cancelled = True
 
     def _has_annotation(self, image_path: str) -> bool:
         """检查图片是否已有 VOC 标注文件

@@ -49,6 +49,7 @@ from qfluentwidgets import (
 )
 
 from ez_traing.common.constants import SUPPORTED_IMAGE_FORMATS
+from ez_traing.common.image_utils import imread_unicode
 
 logger = logging.getLogger(__name__)
 
@@ -176,6 +177,8 @@ class LabelScanWorker(QThread):
         class_names: List[str],
         size_cache: Dict[str, tuple],
     ) -> List[BBoxRecord]:
+        from ez_traing.common.annotation_utils import read_yolo_boxes
+
         records: List[BBoxRecord] = []
         img_path = self._find_image_by_stem(txt_path)
         if img_path is None:
@@ -192,38 +195,15 @@ class LabelScanWorker(QThread):
             except Exception:
                 return records
 
-        try:
-            with open(txt_path, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    parts = line.split()
-                    if len(parts) < 5:
-                        continue
-                    try:
-                        cls_id = int(parts[0])
-                        cx = float(parts[1]) * img_w
-                        cy = float(parts[2]) * img_h
-                        bw = float(parts[3]) * img_w
-                        bh = float(parts[4]) * img_h
-                    except ValueError:
-                        continue
-                    label = (
-                        class_names[cls_id]
-                        if class_names and 0 <= cls_id < len(class_names)
-                        else f"class_{cls_id}"
-                    )
-                    records.append(BBoxRecord(
-                        image_path=img_path,
-                        label=label,
-                        x_min=max(0, int(cx - bw / 2)),
-                        y_min=max(0, int(cy - bh / 2)),
-                        x_max=min(img_w, int(cx + bw / 2)),
-                        y_max=min(img_h, int(cy + bh / 2)),
-                    ))
-        except Exception:
-            logger.debug("Failed to parse YOLO: %s", txt_path, exc_info=True)
+        for b in read_yolo_boxes(txt_path, img_w, img_h, class_names):
+            records.append(BBoxRecord(
+                image_path=img_path,
+                label=b["label"],
+                x_min=b["xmin"],
+                y_min=b["ymin"],
+                x_max=b["xmax"],
+                y_max=b["ymax"],
+            ))
         return records
 
     # -- main --
@@ -336,16 +316,6 @@ class GuideExportWorker(QThread):
             self.finished.emit(False, str(e))
 
     @staticmethod
-    def _imread_unicode(path: str) -> Optional[np.ndarray]:
-        """读取可能包含中文等非 ASCII 字符路径的图片。"""
-        try:
-            data = np.fromfile(path, dtype=np.uint8)
-            img = cv2.imdecode(data, cv2.IMREAD_COLOR)
-            return img
-        except Exception:
-            return None
-
-    @staticmethod
     def _encode_to_bytesio(img: np.ndarray) -> Optional[io.BytesIO]:
         """将 OpenCV 图像编码为 JPEG 并返回 BytesIO 对象。"""
         success, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 85])
@@ -418,7 +388,7 @@ class GuideExportWorker(QThread):
                 try:
                     raw = img_cache.pop(rec.image_path, None)
                     if raw is None:
-                        raw = self._imread_unicode(rec.image_path)
+                        raw = imread_unicode(rec.image_path)
                         if raw is None:
                             logger.warning("Cannot read image: %s", rec.image_path)
                             continue

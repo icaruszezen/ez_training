@@ -54,17 +54,17 @@ class TemplateMatchingWorker(QThread):
         self._templates = templates
         self._matcher = matcher
         self._skip_annotated = skip_annotated
-        self._is_cancelled = False
+        self._cancelled = False
 
     def cancel(self):
-        self._is_cancelled = True
+        self._cancelled = True
 
     def run(self):
         stats = TemplateMatchingStats(total=len(self._image_paths))
         tpl_cache = self._matcher.preprocess_templates(self._templates)
 
         for i, image_path in enumerate(self._image_paths):
-            if self._is_cancelled:
+            if self._cancelled:
                 logger.info("模板匹配已被用户取消")
                 stats.cancelled = True
                 break
