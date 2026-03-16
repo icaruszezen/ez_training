@@ -81,6 +81,7 @@ class YoloTrainThread(QThread):
         self._trainer = None
     
     def run(self):
+        model = None
         try:
             self.log_signal.emit(f"[INFO] 开始加载模型: {self.model}")
             
@@ -132,6 +133,7 @@ class YoloTrainThread(QThread):
             self.log_signal.emit(f"[ERROR] 训练失败: {error_msg}")
             self.finished_signal.emit(False, error_msg)
         finally:
+            del model
             gc.collect()
             try:
                 import torch

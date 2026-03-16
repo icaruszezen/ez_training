@@ -1,5 +1,6 @@
 """本地 YOLO .pt 推理服务。"""
 
+import gc
 import logging
 import threading
 from pathlib import Path
@@ -63,9 +64,31 @@ class YoloModelService:
                 logger.info("复用已缓存的 YOLO 模型: %s", self._model_path)
                 self._model = self._model_cache[resolved]
             else:
+                self._evict_cache_locked()
                 self._model = YOLO(self._model_path)
                 self._model_cache[resolved] = self._model
                 logger.info("YOLO 模型已加载并缓存: %s", self._model_path)
+
+    @classmethod
+    def _evict_cache_locked(cls) -> None:
+        """Evict all cached models to free GPU memory. Caller must hold _cache_lock."""
+        if not cls._model_cache:
+            return
+        cls._model_cache.clear()
+        gc.collect()
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+        logger.info("已清理 YOLO 模型缓存并释放显存")
+
+    @classmethod
+    def clear_model_cache(cls) -> None:
+        """清理模型缓存并释放 GPU 显存。"""
+        with cls._cache_lock:
+            cls._evict_cache_locked()
 
     def _predict(
         self, image_path: str, device: Optional[str] = None,

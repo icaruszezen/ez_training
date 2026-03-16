@@ -8,6 +8,7 @@ import os
 import shutil
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from collections import OrderedDict
 from typing import Dict, List, Optional, Set, Tuple
 
 from PyQt5.QtCore import Qt, QSize, QThread, pyqtSignal
@@ -299,9 +300,10 @@ class BatchImageListPanel(CardWidget):
         super().__init__(parent)
         self.setMinimumWidth(280)
         self.setMaximumWidth(400)
+        self._THUMBNAIL_CACHE_MAX = 500
         self._all_paths: List[str] = []
         self._path_to_item: Dict[str, QListWidgetItem] = {}
-        self._thumbnail_cache: Dict[str, QPixmap] = {}
+        self._thumbnail_cache: OrderedDict[str, QPixmap] = OrderedDict()
         self._mismatch_paths: set = set()
         self._success_paths: set = set()
         self._sampled_paths: Set[str] = set()
@@ -415,7 +417,11 @@ class BatchImageListPanel(CardWidget):
 
     def _on_thumbnail_loaded(self, path: str, image: QImage):
         pixmap = QPixmap.fromImage(image)
+        if path in self._thumbnail_cache:
+            self._thumbnail_cache.move_to_end(path)
         self._thumbnail_cache[path] = pixmap
+        while len(self._thumbnail_cache) > self._THUMBNAIL_CACHE_MAX:
+            self._thumbnail_cache.popitem(last=False)
         item = self._path_to_item.get(self._norm(path))
         if item:
             item.setIcon(QIcon(pixmap))
@@ -423,7 +429,7 @@ class BatchImageListPanel(CardWidget):
     def _stop_thumbnail_loader(self):
         if self._thumbnail_loader and self._thumbnail_loader.isRunning():
             self._thumbnail_loader.cancel()
-            self._thumbnail_loader.wait()
+            self._thumbnail_loader.wait(3000)
         self._thumbnail_loader = None
 
     def mark_mismatch(self, paths: List[str]):
@@ -831,7 +837,7 @@ class BatchAnnotationPage(QWidget):
         if self._scan_worker and self._scan_worker.isRunning():
             self._scan_worker.finished.disconnect(self._on_scan_finished)
             self._scan_worker.cancel()
-            self._scan_worker.wait()
+            self._scan_worker.wait(3000)
 
         self.status_label.setText(f"正在扫描: {proj.name}...")
         self._scan_worker = ImageScanWorker(proj.id, directories=dirs)

@@ -45,7 +45,6 @@ from ez_traing.ui.workers import ImageScanWorker as ProjectImageScanWorker
 from ez_traing.prelabeling.engine import PrelabelingWorker, validate_prelabeling_input
 from ez_traing.prelabeling.models import DetectionMode, InferenceBackend, PrelabelingStats
 from ez_traing.prelabeling.vision_service import VisionModelService
-from ez_traing.prelabeling.yolo_service import YoloModelService
 
 logger = logging.getLogger(__name__)
 
@@ -923,24 +922,20 @@ class PrelabelingPage(QWidget):
 
         # 创建服务和工作线程
         vision_service = None
-        yolo_service = None
+        yolo_model_path = ""
         max_workers = self.concurrency_spin.value()
         if self._inference_backend == InferenceBackend.VISION_API:
             vision_service = VisionModelService(self._config_manager)
         else:
-            try:
-                yolo_service = YoloModelService(
-                    model_path=self.yolo_model_edit.text().strip()
-                )
-            except Exception as e:
+            yolo_model_path = self.yolo_model_edit.text().strip()
+            if not yolo_model_path:
                 InfoBar.error(
                     title="加载模型失败",
-                    content=str(e),
+                    content="请先选择 YOLO 权重文件（.pt）",
                     parent=self.window(),
                     position=InfoBarPosition.TOP,
                 )
                 return
-            # 本地模型推理使用单线程，避免模型并发访问造成不稳定
             if max_workers > 1:
                 self._log("本地 YOLO 模式下并发已自动调整为 1", level="warning")
                 max_workers = 1
@@ -949,12 +944,12 @@ class PrelabelingPage(QWidget):
             image_paths=self._image_paths,
             prompt=prompt,
             vision_service=vision_service,
-            yolo_service=yolo_service,
             inference_backend=self._inference_backend.value,
             skip_annotated=self.skip_annotated_cb.isChecked(),
             max_workers=max_workers,
             reference_images=reference_images,
             detection_mode=self._detection_mode.value,
+            yolo_model_path=yolo_model_path,
         )
 
         # 连接信号

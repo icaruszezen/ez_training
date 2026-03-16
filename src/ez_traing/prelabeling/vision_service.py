@@ -5,6 +5,7 @@ import json
 import logging
 import re
 import time
+from collections import OrderedDict
 from pathlib import Path
 from time import perf_counter
 from typing import Dict, List, Tuple
@@ -38,9 +39,11 @@ class VisionModelService:
         ".webp": "image/webp",
     }
 
+    _ENCODE_CACHE_MAX = 16
+
     def __init__(self, config_manager: APIConfigManager):
         self._config_manager = config_manager
-        self._reference_encode_cache: Dict[Tuple[str, int], Tuple[str, str]] = {}
+        self._reference_encode_cache: OrderedDict[Tuple[str, int], Tuple[str, str]] = OrderedDict()
 
     def encode_image_base64(self, image_path: str) -> Tuple[str, str]:
         """将图片文件读取并编码为 base64 格式。
@@ -107,6 +110,7 @@ class VisionModelService:
                 cache_key = (str(file_path), mtime_ns)
                 cached = self._reference_encode_cache.get(cache_key)
                 if cached is not None:
+                    self._reference_encode_cache.move_to_end(cache_key)
                     encoded.append(cached)
                     cache_hits += 1
                     continue
@@ -120,6 +124,8 @@ class VisionModelService:
                 for key in stale_keys:
                     self._reference_encode_cache.pop(key, None)
                 self._reference_encode_cache[cache_key] = result
+                while len(self._reference_encode_cache) > self._ENCODE_CACHE_MAX:
+                    self._reference_encode_cache.popitem(last=False)
             except (FileNotFoundError, ValueError, OSError) as e:
                 logger.warning("参考图片编码失败，已跳过 %s: %s", path, e)
         logger.info(

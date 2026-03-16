@@ -711,7 +711,7 @@ class AnnotationGuidePage(QWidget):
 
         if self._scan_worker and self._scan_worker.isRunning():
             self._scan_worker.cancel()
-            self._scan_worker.wait()
+            self._scan_worker.wait(3000)
 
         self._label_list.clear()
         self._label_map.clear()
@@ -782,7 +782,7 @@ class AnnotationGuidePage(QWidget):
 
         if self._export_worker and self._export_worker.isRunning():
             self._export_worker.cancel()
-            self._export_worker.wait()
+            self._export_worker.wait(3000)
 
         self._export_btn.setEnabled(False)
         self._export_progress.setVisible(True)

@@ -107,12 +107,14 @@ class PrelabelingWorker(QThread):
         max_workers: int = 1,
         reference_images: List[str] = None,
         detection_mode: str = "text_only",
+        yolo_model_path: str = "",
     ):
         super().__init__()
         self._image_paths = image_paths
         self._prompt = prompt
         self._vision_service = vision_service
         self._yolo_service = yolo_service
+        self._yolo_model_path = yolo_model_path
         self._inference_backend = InferenceBackend(inference_backend)
         self._skip_annotated = skip_annotated
         self._overwrite = overwrite
@@ -134,8 +136,12 @@ class PrelabelingWorker(QThread):
 
         if self._inference_backend == InferenceBackend.VISION_API and self._vision_service is None:
             raise ValueError("视觉 API 模式下必须提供 vision_service")
-        if self._inference_backend == InferenceBackend.YOLO_PT and self._yolo_service is None:
-            raise ValueError("YOLO 模式下必须提供 yolo_service")
+        if (
+            self._inference_backend == InferenceBackend.YOLO_PT
+            and self._yolo_service is None
+            and not self._yolo_model_path
+        ):
+            raise ValueError("YOLO 模式下必须提供 yolo_service 或 yolo_model_path")
 
         self._reference_images = reference_images or []
 
@@ -146,6 +152,17 @@ class PrelabelingWorker(QThread):
         使用线程池并发调用视觉模型检测目标，并将结果保存为 VOC 标注文件。
         支持跳过已标注图片和中途取消。
         """
+        if self._inference_backend == InferenceBackend.YOLO_PT and self._yolo_service is None:
+            try:
+                self.progress.emit(0, len(self._image_paths), "正在加载 YOLO 模型…")
+                self._yolo_service = YoloModelService(model_path=self._yolo_model_path)
+            except Exception as e:
+                stats = PrelabelingStats(total=len(self._image_paths))
+                logger.error("YOLO 模型加载失败: %s", e)
+                self.progress.emit(0, stats.total, f"模型加载失败: {e}")
+                self.finished.emit(stats)
+                return
+
         stats = PrelabelingStats(total=len(self._image_paths))
 
         if self._max_workers <= 1:

@@ -389,14 +389,13 @@ class DataPrepPipeline:
                 shutil.copy2(sample.image_path, out_img)
 
                 image_array = None
-                if do_augment:
+                need_open = do_augment or width is None or height is None
+                if need_open:
                     with Image.open(sample.image_path) as pil_img:
                         if width is None or height is None:
                             width, height = pil_img.size
-                        image_array = np.array(pil_img.convert("RGB"))
-                elif width is None or height is None:
-                    with Image.open(sample.image_path) as pil_img:
-                        width, height = pil_img.size
+                        if do_augment:
+                            image_array = np.array(pil_img.convert("RGB"))
 
                 if width is None or height is None:
                     raise ValueError(f"无法获取图片尺寸: {sample.image_path}")
