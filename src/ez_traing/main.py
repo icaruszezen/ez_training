@@ -73,9 +73,6 @@ from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtWidgets import QApplication
 from qfluentwidgets import Theme, setTheme
 
-QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
-QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
-
 from ez_traing.ui.main_window import AppWindow
 
 
