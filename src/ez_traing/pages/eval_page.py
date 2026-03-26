@@ -40,9 +40,11 @@ from qfluentwidgets import (
     DoubleSpinBox,
     ProgressBar,
     ScrollArea,
+    SwitchButton,
 )
 
 from ez_traing.evaluation.engine import EvaluationEngine
+from ez_traing.evaluation.image_browser import ImageBrowserDialog
 from ez_traing.evaluation.models import EvalConfig, EvalResult
 from ez_traing.evaluation.report_generator import export_reports
 from ez_traing.common.constants import get_config_dir, detect_devices, strip_ansi, open_path
@@ -134,8 +136,8 @@ class EvalConfigPanel(CardWidget):
 
         layout.addWidget(StrongBodyLabel("模型来源", self))
         self.source_combo = ComboBox(self)
-        self.source_combo.addItem("训练记录", "train_runs")
-        self.source_combo.addItem("本地文件", "custom")
+        self.source_combo.addItem("训练记录", userData="train_runs")
+        self.source_combo.addItem("本地文件", userData="custom")
         self.source_combo.currentIndexChanged.connect(self._on_source_changed)
         layout.addWidget(self.source_combo)
 
@@ -200,6 +202,17 @@ class EvalConfigPanel(CardWidget):
         layout.addWidget(self.custom_weight_box)
         self.custom_weight_box.setVisible(False)
 
+        self.unannotated_box = QWidget(self)
+        unannotated_layout = QHBoxLayout(self.unannotated_box)
+        unannotated_layout.setContentsMargins(0, 0, 0, 0)
+        unannotated_layout.addWidget(BodyLabel("包含无标注图片:", self))
+        self.unannotated_switch = SwitchButton(self)
+        self.unannotated_switch.setChecked(False)
+        unannotated_layout.addWidget(self.unannotated_switch)
+        unannotated_layout.addStretch()
+        layout.addWidget(self.unannotated_box)
+        self.unannotated_box.setVisible(False)
+
         layout.addWidget(StrongBodyLabel("验证参数", self))
         imgsz_layout = QHBoxLayout()
         imgsz_layout.addWidget(BodyLabel("Image Size:", self))
@@ -242,7 +255,7 @@ class EvalConfigPanel(CardWidget):
         device_layout.addWidget(BodyLabel("Device:", self))
         self.device_combo = ComboBox(self)
         for device_id, display in detect_devices():
-            self.device_combo.addItem(display, device_id)
+            self.device_combo.addItem(display, userData=device_id)
         device_layout.addWidget(self.device_combo)
         layout.addLayout(device_layout)
 
@@ -282,6 +295,7 @@ class EvalConfigPanel(CardWidget):
         source = self.source_combo.currentData()
         self.train_weight_box.setVisible(source == "train_runs")
         self.custom_weight_box.setVisible(source == "custom")
+        self.unannotated_box.setVisible(source == "custom")
         self._refresh_model_hint()
 
     def _refresh_datasets(self):
@@ -289,7 +303,7 @@ class EvalConfigPanel(CardWidget):
             return
         self.dataset_combo.clear()
         for proj in self._project_manager.get_all_projects(exclude_archived=True):
-            self.dataset_combo.addItem(proj.name, proj.id)
+            self.dataset_combo.addItem(proj.name, userData=proj.id)
 
     def _refresh_train_runs(self):
         self.run_list.clear()
@@ -438,6 +452,7 @@ class EvalConfigPanel(CardWidget):
             "iou": self.iou_spin.value(),
             "source": self.source_combo.currentData(),
             "output_root": str(self._output_root),
+            "include_unannotated": self.unannotated_switch.isChecked(),
         }
         self.start_eval.emit(config)
 
@@ -457,6 +472,7 @@ class EvalConfigPanel(CardWidget):
         self.refresh_dataset_btn.setEnabled(not running)
         self.refresh_runs_btn.setEnabled(not running)
         self.browse_model_btn.setEnabled(not running)
+        self.unannotated_switch.setEnabled(not running)
         self.browse_output_btn.setEnabled(not running)
 
 
@@ -559,7 +575,12 @@ class EvalResultPanel(CardWidget):
         self._save_dir = ""
         self._dataset_name = ""
         self._model_path = ""
+        self._data_yaml = ""
+        self._conf = 0.25
+        self._iou = 0.45
+        self._imgsz = 640
         self._chart_labels: Dict[str, QLabel] = {}
+        self._browser_dialog: Optional[ImageBrowserDialog] = None
         self._init_ui()
 
     def _init_ui(self):
@@ -575,6 +596,12 @@ class EvalResultPanel(CardWidget):
         self.open_dir_btn.clicked.connect(self._open_dir)
         self.open_dir_btn.setEnabled(False)
         header_layout.addWidget(self.open_dir_btn)
+
+        self.browse_btn = PushButton("浏览图片", self)
+        self.browse_btn.setIcon(FIF.SEARCH)
+        self.browse_btn.clicked.connect(self._open_browser)
+        self.browse_btn.setEnabled(False)
+        header_layout.addWidget(self.browse_btn)
 
         self.export_btn = PushButton("导出报告", self)
         self.export_btn.setIcon(FIF.SAVE)
@@ -629,10 +656,17 @@ class EvalResultPanel(CardWidget):
 
     def set_result(self, result: EvalResult, config: Optional[EvalConfig] = None):
         self._save_dir = result.save_dir or ""
+        self._data_yaml = result.data_yaml or ""
         if config:
             self._dataset_name = config.dataset_name
             self._model_path = config.model_path
+            self._conf = config.conf
+            self._iou = config.iou
+            self._imgsz = config.imgsz
         self.open_dir_btn.setEnabled(bool(self._save_dir))
+        self.browse_btn.setEnabled(
+            result.success and bool(self._data_yaml) and bool(self._model_path)
+        )
         self.export_btn.setEnabled(result.success)
         self.export_to_btn.setEnabled(result.success)
         self.copy_metrics_btn.setEnabled(result.success and result.metrics is not None)
@@ -683,11 +717,33 @@ class EvalResultPanel(CardWidget):
         if image_path and os.path.exists(image_path):
             open_path(image_path)
 
+    def _open_browser(self):
+        if self._browser_dialog is not None:
+            self._browser_dialog.raise_()
+            self._browser_dialog.activateWindow()
+            return
+        if not self._data_yaml or not self._model_path:
+            return
+        dlg = ImageBrowserDialog(
+            data_yaml=self._data_yaml,
+            model_path=self._model_path,
+            conf=self._conf,
+            iou=self._iou,
+            imgsz=self._imgsz,
+            parent=self.window(),
+        )
+        dlg.setAttribute(Qt.WA_DeleteOnClose)
+        dlg.destroyed.connect(lambda: setattr(self, "_browser_dialog", None))
+        self._browser_dialog = dlg
+        dlg.show()
+
     def clear_result(self):
         self._save_dir = ""
         self._dataset_name = ""
         self._model_path = ""
+        self._data_yaml = ""
         self.open_dir_btn.setEnabled(False)
+        self.browse_btn.setEnabled(False)
         self.export_btn.setEnabled(False)
         self.export_to_btn.setEnabled(False)
         self.copy_metrics_btn.setEnabled(False)
@@ -783,6 +839,7 @@ class EvalPage(QWidget):
             iou=config_data["iou"],
             source=config_data["source"],
             output_root=config_data["output_root"],
+            include_unannotated=config_data.get("include_unannotated", False),
         )
 
         self._last_result = None

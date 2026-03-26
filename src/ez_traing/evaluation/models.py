@@ -18,6 +18,7 @@ class EvalConfig:
     iou: float = 0.45
     source: str = "custom"
     output_root: str = ""
+    include_unannotated: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

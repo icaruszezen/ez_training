@@ -1,16 +1,22 @@
 """YOLO 验证引擎。"""
 
+import logging
 import math
+import os
 import re
+import shutil
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 import yaml
 
-from ez_traing.common.constants import get_config_dir
+from ez_traing.common.constants import get_config_dir, SUPPORTED_IMAGE_FORMATS
+from ez_traing.common.voc_io import parse_voc_objects, parse_voc_size
 from ez_traing.evaluation.models import EvalConfig, EvalMetrics, EvalResult
 from ez_traing.evaluation.visualization import discover_yolo_plots, generate_fallback_charts
+
+logger = logging.getLogger(__name__)
 
 
 # \w matches Unicode letters (including CJK), intentional for Chinese names.
@@ -98,6 +104,158 @@ def build_data_yaml(dataset_name: str, dataset_dir: str, output_dir: str) -> str
     return str(yaml_path)
 
 
+def _is_voc_dataset(dataset_dir: str) -> bool:
+    """Return True if the directory (or its subdirectories) contains VOC XML files."""
+    root = Path(dataset_dir)
+    if not root.is_dir():
+        return False
+    return any(root.rglob("*.xml"))
+
+
+def _link_or_copy(src: Path, dst: Path) -> None:
+    """Create a symlink; fall back to hard link then copy on failure."""
+    try:
+        os.symlink(src, dst)
+        return
+    except OSError:
+        pass
+    try:
+        os.link(src, dst)
+        return
+    except OSError:
+        pass
+    shutil.copy2(src, dst)
+
+
+def prepare_voc_dataset(
+    dataset_dir: str,
+    output_dir: str,
+    dataset_name: str,
+    model_names: Dict[int, str],
+    include_unannotated: bool = False,
+    log_callback: Optional[Callable[[str], None]] = None,
+) -> str:
+    """Build a temporary YOLO-format dataset from images + VOC XML annotations.
+
+    *model_names* must be the class name dict from the loaded YOLO model
+    (``{0: 'cls_a', 1: 'cls_b', ...}``).  The mapping ensures XML labels
+    are converted to the exact indices the model expects.
+
+    Returns the path to the generated ``data.yaml``.
+    """
+
+    def emit(msg: str) -> None:
+        if log_callback:
+            log_callback(msg)
+
+    root = Path(dataset_dir)
+    if not root.is_dir():
+        raise ValueError(f"数据集目录不存在: {dataset_dir}")
+
+    class_to_idx: Dict[str, int] = {name: idx for idx, name in model_names.items()}
+    emit(f"[INFO] 使用模型类别 ({len(model_names)}): {list(model_names.values())}")
+
+    image_files: List[Path] = sorted(
+        p for p in root.rglob("*")
+        if p.is_file() and p.suffix.lower() in SUPPORTED_IMAGE_FORMATS
+    )
+    if not image_files:
+        raise ValueError(f"数据集目录中未找到图片: {dataset_dir}")
+
+    emit(f"[INFO] 扫描到 {len(image_files)} 张图片")
+
+    pairs: List[Tuple[Path, Optional[Path]]] = []
+    annotated = 0
+    unannotated = 0
+    skipped_labels: set = set()
+
+    for img in image_files:
+        xml_path = img.with_suffix(".xml")
+        if xml_path.exists():
+            objects = parse_voc_objects(xml_path)
+            for obj in objects:
+                if obj.label not in class_to_idx:
+                    skipped_labels.add(obj.label)
+            pairs.append((img, xml_path))
+            annotated += 1
+        elif include_unannotated:
+            pairs.append((img, None))
+            unannotated += 1
+
+    if not pairs:
+        raise ValueError("未找到带 XML 标注的图片（若要包含无标注图片请开启对应选项）")
+
+    if skipped_labels:
+        emit(f"[WARN] XML 中存在模型未包含的类别（将跳过）: {sorted(skipped_labels)}")
+
+    emit(f"[INFO] 已标注: {annotated}, 无标注: {unannotated}")
+
+    prep_dir = Path(output_dir) / f"_voc_prepared_{_sanitize_name(dataset_name)}"
+    images_dir = prep_dir / "images" / "val"
+    labels_dir = prep_dir / "labels" / "val"
+    if prep_dir.exists():
+        shutil.rmtree(prep_dir, ignore_errors=True)
+    images_dir.mkdir(parents=True, exist_ok=True)
+    labels_dir.mkdir(parents=True, exist_ok=True)
+
+    seen_names: Dict[str, int] = {}
+    converted = 0
+
+    for img_path, xml_path in pairs:
+        rel = img_path.relative_to(root)
+        if len(rel.parts) > 1:
+            prefix = "_".join(rel.parts[:-1]) + "_"
+        else:
+            prefix = ""
+        stem = prefix + img_path.stem
+        suffix = img_path.suffix
+        if stem in seen_names:
+            seen_names[stem] += 1
+            stem = f"{stem}_{seen_names[stem]}"
+        else:
+            seen_names[stem] = 0
+
+        dst_img = images_dir / f"{stem}{suffix}"
+        _link_or_copy(img_path, dst_img)
+
+        label_path = labels_dir / f"{stem}.txt"
+        if xml_path is not None:
+            objects = parse_voc_objects(xml_path)
+            size = parse_voc_size(xml_path)
+            if size and objects:
+                w, h = size
+                lines: List[str] = []
+                for obj in objects:
+                    if obj.label not in class_to_idx:
+                        continue
+                    cx = (obj.xmin + obj.xmax) / 2.0 / w
+                    cy = (obj.ymin + obj.ymax) / 2.0 / h
+                    bw = (obj.xmax - obj.xmin) / w
+                    bh = (obj.ymax - obj.ymin) / h
+                    lines.append(f"{class_to_idx[obj.label]} {cx:.6f} {cy:.6f} {bw:.6f} {bh:.6f}")
+                label_path.write_text("\n".join(lines), encoding="utf-8")
+                converted += 1
+            else:
+                label_path.write_text("", encoding="utf-8")
+        else:
+            label_path.write_text("", encoding="utf-8")
+
+    emit(f"[INFO] 已转换 {converted} 个 XML 标注为 YOLO 格式")
+
+    data_config = {
+        "path": str(prep_dir),
+        "train": "images/val",
+        "val": "images/val",
+        "names": dict(model_names),
+    }
+    yaml_path = prep_dir / "data.yaml"
+    with open(yaml_path, "w", encoding="utf-8") as f:
+        yaml.dump(data_config, f, allow_unicode=True, default_flow_style=False)
+
+    emit(f"[INFO] 生成 data yaml: {yaml_path}")
+    return str(yaml_path)
+
+
 class EvaluationEngine:
     """模型验证执行器。"""
 
@@ -143,33 +301,49 @@ class EvaluationEngine:
             if is_cancelled():
                 return EvalResult(success=False, message=_CANCEL_MSG)
 
-            data_yaml = build_data_yaml(config.dataset_name, config.dataset_dir, str(output_root))
-            emit_log(f"[INFO] 生成 data yaml: {data_yaml}")
-            emit_progress(20)
-
             try:
                 from ultralytics import YOLO
             except ImportError as e:
                 raise RuntimeError("未安装 ultralytics，请先安装依赖") from e
 
+            emit_log("[INFO] 正在加载模型...")
+            model = YOLO(config.model_path)
+            model_names = getattr(model, "names", None) or {}
+            emit_log(f"[INFO] 模型类别 ({len(model_names)}): {list(model_names.values())}")
+            emit_progress(20)
+
             if is_cancelled():
                 return EvalResult(success=False, message=_CANCEL_MSG)
 
-            emit_log("[INFO] 正在加载模型...")
-            model = YOLO(config.model_path)
-            emit_progress(30)
-
-            model_names = getattr(model, "names", None)
-            if model_names:
-                with open(data_yaml, "r", encoding="utf-8") as f:
-                    data_cfg = yaml.safe_load(f)
-                dataset_nc = len(data_cfg.get("names", {}))
-                model_nc = len(model_names)
-                if dataset_nc != model_nc:
-                    emit_log(
-                        f"[WARN] 类别数不匹配: 模型={model_nc}, 数据集={dataset_nc}，"
-                        "结果可能不准确"
+            if _is_voc_dataset(config.dataset_dir):
+                emit_log("[INFO] 检测到 VOC 格式数据集，正在转换为 YOLO 格式...")
+                if not model_names:
+                    raise ValueError("模型中未包含类别信息，无法进行 VOC 数据集转换")
+                data_yaml = prepare_voc_dataset(
+                    dataset_dir=config.dataset_dir,
+                    output_dir=str(output_root),
+                    dataset_name=config.dataset_name,
+                    model_names=model_names,
+                    include_unannotated=config.include_unannotated,
+                    log_callback=log_callback,
+                )
+            else:
+                try:
+                    data_yaml = build_data_yaml(config.dataset_name, config.dataset_dir, str(output_root))
+                    emit_log(f"[INFO] 生成 data yaml: {data_yaml}")
+                except ValueError:
+                    emit_log("[WARN] YOLO 格式加载失败，尝试使用 VOC XML 标注...")
+                    if not model_names:
+                        raise
+                    data_yaml = prepare_voc_dataset(
+                        dataset_dir=config.dataset_dir,
+                        output_dir=str(output_root),
+                        dataset_name=config.dataset_name,
+                        model_names=model_names,
+                        include_unannotated=config.include_unannotated,
+                        log_callback=log_callback,
                     )
+            emit_progress(30)
 
             if is_cancelled():
                 return EvalResult(success=False, message=_CANCEL_MSG)

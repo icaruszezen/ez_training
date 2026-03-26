@@ -274,7 +274,7 @@ class ConfigPanel(CardWidget):
         self.device_combo.clear()
         devices = detect_devices()
         for device_id, display_name in devices:
-            self.device_combo.addItem(display_name, device_id)
+            self.device_combo.addItem(display_name, userData=device_id)
     
     def _browse_train_folder(self):
         """选择训练文件夹"""
