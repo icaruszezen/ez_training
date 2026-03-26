@@ -1,8 +1,8 @@
-"""数据模型单元测试"""
+﻿"""数据模型单元测试"""
 
 from dataclasses import asdict
 
-from ez_traing.prelabeling.models import (
+from ez_training.prelabeling.models import (
     BoundingBox,
     DetectionMode,
     DetectionResult,

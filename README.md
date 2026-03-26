@@ -1,4 +1,4 @@
-# EZ Traing
+﻿# EZ Training
 
 目标检测标注 & 训练一条龙工具，基于 PyQt5 + Fluent Design。
 
@@ -22,7 +22,7 @@
 ## 项目结构
 
 ```
-src/ez_traing/
+src/ez_training/
 ├── main.py                  # 入口
 ├── dep_installer.py         # 运行时依赖安装 (torch/ultralytics)
 ├── updater.py               # GitHub Releases 自动更新
@@ -45,12 +45,12 @@ src/ez_traing/
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-python src/ez_traing/main.py
+python src/ez_training/main.py
 ```
 
 ### 打包版（exe）
 
-直接运行 `ez_traing.exe`。首次使用需要安装 PyTorch 和 Ultralytics——运行 exe 同目录下的 `install_deps.bat`，按提示选 CUDA 版本就行。
+直接运行 `ez_training.exe`。首次使用需要安装 PyTorch 和 Ultralytics——运行 exe 同目录下的 `install_deps.bat`，按提示选 CUDA 版本就行。
 
 程序会自动检查 GitHub Releases 上的新版本。
 
@@ -65,7 +65,7 @@ python src/ez_traing/main.py
 
 ## 配置文件
 
-配置存在 `~/.ez_traing/` 下：
+配置存在 `~/.ez_training/` 下：
 
 - `datasets.json` — 数据集项目列表
 - `vision_api_config.json` — 视觉 API 密钥和端点

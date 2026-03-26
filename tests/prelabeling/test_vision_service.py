@@ -1,17 +1,17 @@
-"""VisionModelService 单元测试 - 图片编码功能"""
+﻿"""VisionModelService 单元测试 - 图片编码功能"""
 
 import base64
 
 import pytest
 
-from ez_traing.prelabeling.config import APIConfigManager
-from ez_traing.prelabeling.vision_service import VisionModelService
+from ez_training.prelabeling.config import APIConfigManager
+from ez_training.prelabeling.vision_service import VisionModelService
 
 
 @pytest.fixture
 def config_manager(tmp_path):
     """提供 APIConfigManager 实例"""
-    config_dir = tmp_path / ".ez_traing"
+    config_dir = tmp_path / ".ez_training"
     return APIConfigManager(config_dir=config_dir)
 
 
@@ -228,7 +228,7 @@ class TestBuildRequestPayload:
 
 import json
 
-from ez_traing.prelabeling.models import BoundingBox
+from ez_training.prelabeling.models import BoundingBox
 
 
 class TestParseResponse:
@@ -490,13 +490,13 @@ from unittest.mock import MagicMock, patch
 
 import requests
 
-from ez_traing.prelabeling.models import DetectionResult
+from ez_training.prelabeling.models import DetectionResult
 
 
 def _setup_service_with_config(tmp_path, endpoint="https://api.example.com/v1/chat/completions",
                                 api_key="sk-test-key-123", timeout=30):
     """创建配置好的 service 实例并返回 (service, image_path)"""
-    config_dir = tmp_path / ".ez_traing"
+    config_dir = tmp_path / ".ez_training"
     mgr = APIConfigManager(config_dir=config_dir)
     mgr.update_config(endpoint=endpoint, api_key=api_key, timeout=timeout)
     svc = VisionModelService(mgr)
@@ -523,7 +523,7 @@ def _make_api_response(content_text, status_code=200):
 class TestDetectObjects:
     """detect_objects 方法测试"""
 
-    @patch("ez_traing.prelabeling.vision_service.requests.post")
+    @patch("ez_training.prelabeling.vision_service.requests.post")
     def test_successful_detection(self, mock_post, tmp_path):
         """成功检测返回 DetectionResult(success=True)"""
         svc, img = _setup_service_with_config(tmp_path)
@@ -540,7 +540,7 @@ class TestDetectObjects:
         assert result.boxes[0].x_min == 10
         assert result.boxes[0].confidence == 0.9
 
-    @patch("ez_traing.prelabeling.vision_service.requests.post")
+    @patch("ez_training.prelabeling.vision_service.requests.post")
     def test_sends_post_to_endpoint(self, mock_post, tmp_path):
         """应向配置的 endpoint 发送 POST 请求"""
         svc, img = _setup_service_with_config(
@@ -553,7 +553,7 @@ class TestDetectObjects:
         call_args = mock_post.call_args
         assert call_args[0][0] == "https://my-api.com/v1/chat/completions"
 
-    @patch("ez_traing.prelabeling.vision_service.requests.post")
+    @patch("ez_training.prelabeling.vision_service.requests.post")
     def test_authorization_header(self, mock_post, tmp_path):
         """请求头应包含 Authorization: Bearer {api_key}"""
         svc, img = _setup_service_with_config(tmp_path, api_key="sk-my-secret")
@@ -564,7 +564,7 @@ class TestDetectObjects:
         headers = mock_post.call_args[1]["headers"]
         assert headers["Authorization"] == "Bearer sk-my-secret"
 
-    @patch("ez_traing.prelabeling.vision_service.requests.post")
+    @patch("ez_training.prelabeling.vision_service.requests.post")
     def test_content_type_header(self, mock_post, tmp_path):
         """请求头应包含 Content-Type: application/json"""
         svc, img = _setup_service_with_config(tmp_path)
@@ -575,7 +575,7 @@ class TestDetectObjects:
         headers = mock_post.call_args[1]["headers"]
         assert headers["Content-Type"] == "application/json"
 
-    @patch("ez_traing.prelabeling.vision_service.requests.post")
+    @patch("ez_training.prelabeling.vision_service.requests.post")
     def test_timeout_from_config(self, mock_post, tmp_path):
         """请求超时应使用配置中的 timeout 值"""
         svc, img = _setup_service_with_config(tmp_path, timeout=45)
@@ -585,7 +585,7 @@ class TestDetectObjects:
 
         assert mock_post.call_args[1]["timeout"] == 45
 
-    @patch("ez_traing.prelabeling.vision_service.requests.post")
+    @patch("ez_training.prelabeling.vision_service.requests.post")
     def test_request_payload_sent_as_json(self, mock_post, tmp_path):
         """请求体应作为 JSON 发送，包含 model 和 messages"""
         svc, img = _setup_service_with_config(tmp_path)
@@ -598,7 +598,7 @@ class TestDetectObjects:
         assert "messages" in payload
         assert "max_tokens" in payload
 
-    @patch("ez_traing.prelabeling.vision_service.requests.post")
+    @patch("ez_training.prelabeling.vision_service.requests.post")
     def test_timeout_error(self, mock_post, tmp_path):
         """请求超时应返回 success=False 并包含超时信息"""
         svc, img = _setup_service_with_config(tmp_path, timeout=10)
@@ -610,7 +610,7 @@ class TestDetectObjects:
         assert "超时" in result.error_message
         assert "10" in result.error_message
 
-    @patch("ez_traing.prelabeling.vision_service.requests.post")
+    @patch("ez_training.prelabeling.vision_service.requests.post")
     def test_connection_error(self, mock_post, tmp_path):
         """连接失败应返回 success=False 并包含网络错误信息"""
         svc, img = _setup_service_with_config(tmp_path)
@@ -621,7 +621,7 @@ class TestDetectObjects:
         assert result.success is False
         assert "网络连接失败" in result.error_message
 
-    @patch("ez_traing.prelabeling.vision_service.requests.post")
+    @patch("ez_training.prelabeling.vision_service.requests.post")
     def test_http_error(self, mock_post, tmp_path):
         """HTTP 错误应返回 success=False 并包含状态码"""
         svc, img = _setup_service_with_config(tmp_path)
@@ -639,7 +639,7 @@ class TestDetectObjects:
         assert "401" in result.error_message
         assert result.raw_response == '{"error": "Unauthorized"}'
 
-    @patch("ez_traing.prelabeling.vision_service.requests.post")
+    @patch("ez_training.prelabeling.vision_service.requests.post")
     def test_invalid_response_structure(self, mock_post, tmp_path):
         """响应缺少 choices 字段应返回 success=False"""
         svc, img = _setup_service_with_config(tmp_path)
@@ -655,7 +655,7 @@ class TestDetectObjects:
         assert result.success is False
         assert "响应结构异常" in result.error_message
 
-    @patch("ez_traing.prelabeling.vision_service.requests.post")
+    @patch("ez_training.prelabeling.vision_service.requests.post")
     def test_parse_response_value_error(self, mock_post, tmp_path):
         """parse_response 抛出 ValueError 应返回 success=False"""
         svc, img = _setup_service_with_config(tmp_path)
@@ -670,7 +670,7 @@ class TestDetectObjects:
 
     def test_image_not_found(self, tmp_path):
         """图片不存在应返回 success=False"""
-        config_dir = tmp_path / ".ez_traing"
+        config_dir = tmp_path / ".ez_training"
         mgr = APIConfigManager(config_dir=config_dir)
         svc = VisionModelService(mgr)
 
@@ -681,7 +681,7 @@ class TestDetectObjects:
 
     def test_unsupported_image_format(self, tmp_path):
         """不支持的图片格式应返回 success=False"""
-        config_dir = tmp_path / ".ez_traing"
+        config_dir = tmp_path / ".ez_training"
         mgr = APIConfigManager(config_dir=config_dir)
         svc = VisionModelService(mgr)
         img = tmp_path / "test.gif"
@@ -692,7 +692,7 @@ class TestDetectObjects:
         assert result.success is False
         assert "图片编码失败" in result.error_message
 
-    @patch("ez_traing.prelabeling.vision_service.requests.post")
+    @patch("ez_training.prelabeling.vision_service.requests.post")
     def test_empty_detection_result(self, mock_post, tmp_path):
         """模型返回空 objects 应返回 success=True 且 boxes 为空"""
         svc, img = _setup_service_with_config(tmp_path)
@@ -703,7 +703,7 @@ class TestDetectObjects:
         assert result.success is True
         assert result.boxes == []
 
-    @patch("ez_traing.prelabeling.vision_service.requests.post")
+    @patch("ez_training.prelabeling.vision_service.requests.post")
     def test_multiple_boxes_detected(self, mock_post, tmp_path):
         """多个目标检测结果应全部返回"""
         svc, img = _setup_service_with_config(tmp_path)
@@ -722,7 +722,7 @@ class TestDetectObjects:
         assert result.boxes[0].label == "cat"
         assert result.boxes[1].label == "dog"
 
-    @patch("ez_traing.prelabeling.vision_service.requests.post")
+    @patch("ez_training.prelabeling.vision_service.requests.post")
     def test_raw_response_on_success(self, mock_post, tmp_path):
         """成功时 raw_response 应包含模型返回的文本内容"""
         svc, img = _setup_service_with_config(tmp_path)
@@ -733,7 +733,7 @@ class TestDetectObjects:
 
         assert result.raw_response == content
 
-    @patch("ez_traing.prelabeling.vision_service.requests.post")
+    @patch("ez_training.prelabeling.vision_service.requests.post")
     def test_general_request_exception(self, mock_post, tmp_path):
         """其他 requests 异常应返回 success=False"""
         svc, img = _setup_service_with_config(tmp_path)
@@ -1092,7 +1092,7 @@ class TestBuildReferenceImagePayload:
 class TestDetectObjectsWithReference:
     """detect_objects_with_reference 方法测试"""
 
-    @patch("ez_traing.prelabeling.vision_service.requests.post")
+    @patch("ez_training.prelabeling.vision_service.requests.post")
     def test_successful_detection(self, mock_post, tmp_path):
         """成功检测返回 DetectionResult(success=True)"""
         svc, _ = _setup_service_with_config(tmp_path)
@@ -1112,7 +1112,7 @@ class TestDetectObjectsWithReference:
         assert result.boxes[0].label == "cat"
         assert result.boxes[0].confidence == 0.9
 
-    @patch("ez_traing.prelabeling.vision_service.requests.post")
+    @patch("ez_training.prelabeling.vision_service.requests.post")
     def test_sends_post_to_endpoint(self, mock_post, tmp_path):
         """应向配置的 endpoint 发送 POST 请求"""
         svc, _ = _setup_service_with_config(
@@ -1126,7 +1126,7 @@ class TestDetectObjectsWithReference:
 
         assert mock_post.call_args[0][0] == "https://my-api.com/v1/chat/completions"
 
-    @patch("ez_traing.prelabeling.vision_service.requests.post")
+    @patch("ez_training.prelabeling.vision_service.requests.post")
     def test_authorization_header(self, mock_post, tmp_path):
         """请求头应包含正确的 Authorization"""
         svc, _ = _setup_service_with_config(tmp_path, api_key="sk-ref-key")
@@ -1139,7 +1139,7 @@ class TestDetectObjectsWithReference:
         headers = mock_post.call_args[1]["headers"]
         assert headers["Authorization"] == "Bearer sk-ref-key"
 
-    @patch("ez_traing.prelabeling.vision_service.requests.post")
+    @patch("ez_training.prelabeling.vision_service.requests.post")
     def test_payload_contains_reference_and_target_images(self, mock_post, tmp_path):
         """请求体应包含参考图片和待检测图片"""
         svc, _ = _setup_service_with_config(tmp_path)
@@ -1156,7 +1156,7 @@ class TestDetectObjectsWithReference:
         # 2 ref + 1 target = 3 images
         assert len(image_items) == 3
 
-    @patch("ez_traing.prelabeling.vision_service.requests.post")
+    @patch("ez_training.prelabeling.vision_service.requests.post")
     def test_user_description_in_payload(self, mock_post, tmp_path):
         """user_description 应包含在请求体的提示词中"""
         svc, _ = _setup_service_with_config(tmp_path)
@@ -1183,7 +1183,7 @@ class TestDetectObjectsWithReference:
         assert result.success is False
         assert "参考图片编码失败" in result.error_message
 
-    @patch("ez_traing.prelabeling.vision_service.requests.post")
+    @patch("ez_training.prelabeling.vision_service.requests.post")
     def test_partial_reference_images_valid(self, mock_post, tmp_path):
         """部分参考图片无效时应继续使用有效的图片"""
         svc, _ = _setup_service_with_config(tmp_path)
@@ -1222,7 +1222,7 @@ class TestDetectObjectsWithReference:
         assert result.success is False
         assert "待检测图片编码失败" in result.error_message
 
-    @patch("ez_traing.prelabeling.vision_service.requests.post")
+    @patch("ez_training.prelabeling.vision_service.requests.post")
     def test_timeout_error(self, mock_post, tmp_path):
         """请求超时应返回 success=False"""
         svc, _ = _setup_service_with_config(tmp_path, timeout=15)
@@ -1235,7 +1235,7 @@ class TestDetectObjectsWithReference:
         assert result.success is False
         assert "超时" in result.error_message
 
-    @patch("ez_traing.prelabeling.vision_service.requests.post")
+    @patch("ez_training.prelabeling.vision_service.requests.post")
     def test_connection_error(self, mock_post, tmp_path):
         """连接失败应返回 success=False"""
         svc, _ = _setup_service_with_config(tmp_path)
@@ -1248,7 +1248,7 @@ class TestDetectObjectsWithReference:
         assert result.success is False
         assert "网络连接失败" in result.error_message
 
-    @patch("ez_traing.prelabeling.vision_service.requests.post")
+    @patch("ez_training.prelabeling.vision_service.requests.post")
     def test_http_413_payload_too_large(self, mock_post, tmp_path):
         """HTTP 413 应返回建议减少参考图片的提示 (需求 7.3)"""
         svc, _ = _setup_service_with_config(tmp_path)
@@ -1268,7 +1268,7 @@ class TestDetectObjectsWithReference:
         assert "请求体过大" in result.error_message
         assert "减少参考图片" in result.error_message
 
-    @patch("ez_traing.prelabeling.vision_service.requests.post")
+    @patch("ez_training.prelabeling.vision_service.requests.post")
     def test_http_error_non_413(self, mock_post, tmp_path):
         """非 413 HTTP 错误应返回标准错误信息"""
         svc, _ = _setup_service_with_config(tmp_path)
@@ -1288,7 +1288,7 @@ class TestDetectObjectsWithReference:
         assert "500" in result.error_message
         assert result.raw_response == '{"error": "Internal Server Error"}'
 
-    @patch("ez_traing.prelabeling.vision_service.requests.post")
+    @patch("ez_training.prelabeling.vision_service.requests.post")
     def test_invalid_response_structure(self, mock_post, tmp_path):
         """响应缺少 choices 字段应返回 success=False"""
         svc, _ = _setup_service_with_config(tmp_path)
@@ -1306,7 +1306,7 @@ class TestDetectObjectsWithReference:
         assert result.success is False
         assert "响应结构异常" in result.error_message
 
-    @patch("ez_traing.prelabeling.vision_service.requests.post")
+    @patch("ez_training.prelabeling.vision_service.requests.post")
     def test_parse_response_error(self, mock_post, tmp_path):
         """parse_response 失败应返回 success=False"""
         svc, _ = _setup_service_with_config(tmp_path)
@@ -1319,7 +1319,7 @@ class TestDetectObjectsWithReference:
         assert result.success is False
         assert result.raw_response == "not valid detection json"
 
-    @patch("ez_traing.prelabeling.vision_service.requests.post")
+    @patch("ez_training.prelabeling.vision_service.requests.post")
     def test_empty_detection_result(self, mock_post, tmp_path):
         """模型返回空 objects 应返回 success=True 且 boxes 为空"""
         svc, _ = _setup_service_with_config(tmp_path)
@@ -1332,7 +1332,7 @@ class TestDetectObjectsWithReference:
         assert result.success is True
         assert result.boxes == []
 
-    @patch("ez_traing.prelabeling.vision_service.requests.post")
+    @patch("ez_training.prelabeling.vision_service.requests.post")
     def test_raw_response_on_success(self, mock_post, tmp_path):
         """成功时 raw_response 应包含模型返回的文本"""
         svc, _ = _setup_service_with_config(tmp_path)
@@ -1345,7 +1345,7 @@ class TestDetectObjectsWithReference:
 
         assert result.raw_response == content
 
-    @patch("ez_traing.prelabeling.vision_service.requests.post")
+    @patch("ez_training.prelabeling.vision_service.requests.post")
     def test_general_request_exception(self, mock_post, tmp_path):
         """其他 requests 异常应返回 success=False"""
         svc, _ = _setup_service_with_config(tmp_path)

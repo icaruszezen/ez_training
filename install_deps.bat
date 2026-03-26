@@ -1,8 +1,8 @@
-@echo off
+﻿@echo off
 chcp 65001 >nul
 echo.
 echo ══════════════════════════════════════════════════════
-echo   ez_traing 依赖安装脚本
+echo   ez_training 依赖安装脚本
 echo   安装 Ultralytics + PyTorch 到 deps\ 目录
 echo ══════════════════════════════════════════════════════
 echo.
@@ -94,6 +94,6 @@ if %errorlevel% neq 0 (
 
 echo.
 echo ══════════════════════════════════════════════════════
-echo   安装完成！请重启 ez_traing.exe
+echo   安装完成！请重启 ez_training.exe
 echo ══════════════════════════════════════════════════════
 pause

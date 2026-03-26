@@ -1,4 +1,4 @@
-"""VOCAnnotationWriter 单元测试"""
+﻿"""VOCAnnotationWriter 单元测试"""
 
 import os
 from pathlib import Path
@@ -7,8 +7,8 @@ from xml.etree import ElementTree
 import pytest
 from PIL import Image
 
-from ez_traing.prelabeling.models import BoundingBox
-from ez_traing.prelabeling.voc_writer import VOCAnnotationWriter
+from ez_training.prelabeling.models import BoundingBox
+from ez_training.prelabeling.voc_writer import VOCAnnotationWriter
 
 
 @pytest.fixture

@@ -1,4 +1,4 @@
-name: Build & Release
+﻿name: Build & Release
 
 on:
   push:
@@ -25,7 +25,7 @@ jobs:
         id: ver
         shell: bash
         run: |
-          version=$(python -c "exec(open('src/ez_traing/__init__.py').read()); print(__version__)")
+          version=$(python -c "exec(open('src/ez_training/__init__.py').read()); print(__version__)")
           echo "version=v${version}" >> "$GITHUB_OUTPUT"
           echo "Detected version: v${version}"
 
@@ -48,16 +48,16 @@ jobs:
 
       - name: Build with PyInstaller
         if: steps.check_tag.outputs.exists == 'false'
-        run: pyinstaller ez_traing.spec
+        run: pyinstaller ez_training.spec
 
       - name: Copy install script into dist
         if: steps.check_tag.outputs.exists == 'false'
-        run: copy install_deps.bat dist\ez_traing\
+        run: copy install_deps.bat dist\ez_training\
 
       - name: Create zip archive
         if: steps.check_tag.outputs.exists == 'false'
         shell: pwsh
-        run: Compress-Archive -Path dist\ez_traing\* -DestinationPath "ez_traing-${{ steps.ver.outputs.version }}-windows.zip"
+        run: Compress-Archive -Path dist\ez_training\* -DestinationPath "ez_training-${{ steps.ver.outputs.version }}-windows.zip"
 
       - name: Create tag
         if: steps.check_tag.outputs.exists == 'false'
@@ -70,8 +70,8 @@ jobs:
         if: steps.check_tag.outputs.exists == 'false'
         uses: actions/upload-artifact@v4
         with:
-          name: ez_traing-${{ steps.ver.outputs.version }}-windows
-          path: dist/ez_traing/
+          name: ez_training-${{ steps.ver.outputs.version }}-windows
+          path: dist/ez_training/
 
       - name: Create GitHub Release
         if: steps.check_tag.outputs.exists == 'false'
@@ -80,4 +80,4 @@ jobs:
           tag_name: ${{ steps.ver.outputs.version }}
           name: ${{ steps.ver.outputs.version }}
           generate_release_notes: true
-          files: ez_traing-${{ steps.ver.outputs.version }}-windows.zip
+          files: ez_training-${{ steps.ver.outputs.version }}-windows.zip

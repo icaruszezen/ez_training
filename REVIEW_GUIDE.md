@@ -1,4 +1,4 @@
-# EZ Traing 功能 Review 指南
+﻿# EZ Traing 功能 Review 指南
 
 > 本文档为项目各功能模块提供 AI Code Review 提示词，可直接用于 AI 辅助审查。
 > 项目版本：0.2.6 | 技术栈：Python 3 / PyQt5 / PyQt-Fluent-Widgets / Ultralytics YOLO / OpenCV
@@ -29,8 +29,8 @@
 ## 1. 数据集管理
 
 **涉及文件：**
-- `src/ez_traing/pages/dataset_page.py`（~2268 行）
-- `src/ez_traing/ui/workers.py`（ThumbnailLoader, ImageScanWorker）
+- `src/ez_training/pages/dataset_page.py`（~2268 行）
+- `src/ez_training/ui/workers.py`（ThumbnailLoader, ImageScanWorker）
 
 **核心功能：** 项目 CRUD、归档管理、子文件夹模式、图片列表（分页/筛选/缩略图）、标注统计、标注预览、跳转到标注/批量标注页面。
 
@@ -40,8 +40,8 @@
 请对以下数据集管理模块进行全面 Code Review：
 
 涉及文件：
-- src/ez_traing/pages/dataset_page.py
-- src/ez_traing/ui/workers.py
+- src/ez_training/pages/dataset_page.py
+- src/ez_training/ui/workers.py
 
 请重点审查以下方面：
 
@@ -85,13 +85,13 @@
 ## 2. 预标注
 
 **涉及文件：**
-- `src/ez_traing/pages/prelabeling_page.py`
-- `src/ez_traing/prelabeling/engine.py`
-- `src/ez_traing/prelabeling/vision_service.py`
-- `src/ez_traing/prelabeling/yolo_service.py`
-- `src/ez_traing/prelabeling/voc_writer.py`
-- `src/ez_traing/prelabeling/config.py`
-- `src/ez_traing/prelabeling/models.py`
+- `src/ez_training/pages/prelabeling_page.py`
+- `src/ez_training/prelabeling/engine.py`
+- `src/ez_training/prelabeling/vision_service.py`
+- `src/ez_training/prelabeling/yolo_service.py`
+- `src/ez_training/prelabeling/voc_writer.py`
+- `src/ez_training/prelabeling/config.py`
+- `src/ez_training/prelabeling/models.py`
 
 **核心功能：** 支持视觉大模型 API 和本地 YOLO 两种后端进行自动预标注，生成 VOC 格式标注文件。
 
@@ -101,8 +101,8 @@
 请对以下预标注模块进行全面 Code Review：
 
 涉及文件：
-- src/ez_traing/pages/prelabeling_page.py
-- src/ez_traing/prelabeling/ 目录下所有文件
+- src/ez_training/pages/prelabeling_page.py
+- src/ez_training/prelabeling/ 目录下所有文件
 
 请重点审查以下方面：
 
@@ -151,15 +151,15 @@
 ## 3. 图像标注（labelImg 集成）
 
 **涉及文件：**
-- `src/ez_traing/pages/annotation_page.py`
-- `src/ez_traing/labeling/annotation_window.py`
-- `src/ez_traing/labeling/label_app.py`
-- `src/ez_traing/labeling/canvas.py`
-- `src/ez_traing/labeling/shape.py`
-- `src/ez_traing/labeling/label_file.py`
-- `src/ez_traing/labeling/pascal_voc_io.py`
-- `src/ez_traing/labeling/yolo_io.py`
-- `src/ez_traing/labeling/create_ml_io.py`
+- `src/ez_training/pages/annotation_page.py`
+- `src/ez_training/labeling/annotation_window.py`
+- `src/ez_training/labeling/label_app.py`
+- `src/ez_training/labeling/canvas.py`
+- `src/ez_training/labeling/shape.py`
+- `src/ez_training/labeling/label_file.py`
+- `src/ez_training/labeling/pascal_voc_io.py`
+- `src/ez_training/labeling/yolo_io.py`
+- `src/ez_training/labeling/create_ml_io.py`
 
 **核心功能：** 集成 labelImg 标注工具，支持 PascalVOC/YOLO/CreateML 格式，提供画框、编辑、缩放、亮度调节等功能。
 
@@ -169,8 +169,8 @@
 请对以下标注模块进行全面 Code Review：
 
 涉及文件：
-- src/ez_traing/pages/annotation_page.py
-- src/ez_traing/labeling/ 目录下所有文件
+- src/ez_training/pages/annotation_page.py
+- src/ez_training/labeling/ 目录下所有文件
 
 请重点审查以下方面：
 
@@ -216,7 +216,7 @@
 ## 4. 批量标注
 
 **涉及文件：**
-- `src/ez_traing/pages/batch_annotation_page.py`
+- `src/ez_training/pages/batch_annotation_page.py`
 
 **核心功能：** 在第一张图上标注后，将标注批量应用到同分辨率的其他图片；支持加样（将图片复制到指定数据集目录）。
 
@@ -226,7 +226,7 @@
 请对以下批量标注模块进行全面 Code Review：
 
 涉及文件：
-- src/ez_traing/pages/batch_annotation_page.py
+- src/ez_training/pages/batch_annotation_page.py
 
 请重点审查以下方面：
 
@@ -261,10 +261,10 @@
 ## 5. 模板匹配
 
 **涉及文件：**
-- `src/ez_traing/pages/template_matching_page.py`
-- `src/ez_traing/pages/template_editor_dialog.py`
-- `src/ez_traing/template_matching/matcher.py`
-- `src/ez_traing/template_matching/worker.py`
+- `src/ez_training/pages/template_matching_page.py`
+- `src/ez_training/pages/template_editor_dialog.py`
+- `src/ez_training/template_matching/matcher.py`
+- `src/ez_training/template_matching/worker.py`
 
 **核心功能：** 使用 OpenCV 模板匹配在图片中查找目标，支持多模板、多尺度、预处理、NMS 去重，并可保存为 VOC 标注。
 
@@ -274,10 +274,10 @@
 请对以下模板匹配模块进行全面 Code Review：
 
 涉及文件：
-- src/ez_traing/pages/template_matching_page.py
-- src/ez_traing/pages/template_editor_dialog.py
-- src/ez_traing/template_matching/matcher.py
-- src/ez_traing/template_matching/worker.py
+- src/ez_training/pages/template_matching_page.py
+- src/ez_training/pages/template_editor_dialog.py
+- src/ez_training/template_matching/matcher.py
+- src/ez_training/template_matching/worker.py
 
 请重点审查以下方面：
 
@@ -321,12 +321,12 @@
 ## 6. 数据准备
 
 **涉及文件：**
-- `src/ez_traing/pages/data_prep_page.py`
-- `src/ez_traing/data_prep/pipeline.py`
-- `src/ez_traing/data_prep/converter.py`
-- `src/ez_traing/data_prep/splitter.py`
-- `src/ez_traing/data_prep/augmentation.py`
-- `src/ez_traing/data_prep/models.py`
+- `src/ez_training/pages/data_prep_page.py`
+- `src/ez_training/data_prep/pipeline.py`
+- `src/ez_training/data_prep/converter.py`
+- `src/ez_training/data_prep/splitter.py`
+- `src/ez_training/data_prep/augmentation.py`
+- `src/ez_training/data_prep/models.py`
 
 **核心功能：** VOC→YOLO 转换、训练/验证集划分（防泄露）、数据增强（17 种方法）、生成 data.yaml。
 
@@ -336,8 +336,8 @@
 请对以下数据准备模块进行全面 Code Review：
 
 涉及文件：
-- src/ez_traing/pages/data_prep_page.py
-- src/ez_traing/data_prep/ 目录下所有文件
+- src/ez_training/pages/data_prep_page.py
+- src/ez_training/data_prep/ 目录下所有文件
 
 请重点审查以下方面：
 
@@ -382,8 +382,8 @@
 ## 7. 脚本标注
 
 **涉及文件：**
-- `src/ez_traing/pages/script_annotation_page.py`
-- `src/ez_traing/annotation_scripts/voc_utils.py`
+- `src/ez_training/pages/script_annotation_page.py`
+- `src/ez_training/annotation_scripts/voc_utils.py`
 
 **核心功能：** 用户编写 Python 脚本进行自动标注，通过 QProcess 子进程运行，提供脚本管理和日志查看。
 
@@ -393,8 +393,8 @@
 请对以下脚本标注模块进行全面 Code Review：
 
 涉及文件：
-- src/ez_traing/pages/script_annotation_page.py
-- src/ez_traing/annotation_scripts/voc_utils.py
+- src/ez_training/pages/script_annotation_page.py
+- src/ez_training/annotation_scripts/voc_utils.py
 
 请重点审查以下方面：
 
@@ -433,7 +433,7 @@
 ## 8. 模型训练
 
 **涉及文件：**
-- `src/ez_traing/pages/train_page.py`
+- `src/ez_training/pages/train_page.py`
 
 **核心功能：** 配置和启动 YOLOv8 训练，支持 n/s/m/l/x 模型选择、超参数配置、日志流式显示、训练记录和权重管理。
 
@@ -443,7 +443,7 @@
 请对以下训练模块进行全面 Code Review：
 
 涉及文件：
-- src/ez_traing/pages/train_page.py
+- src/ez_training/pages/train_page.py
 
 请重点审查以下方面：
 
@@ -485,11 +485,11 @@
 ## 9. 模型验证/评估
 
 **涉及文件：**
-- `src/ez_traing/pages/eval_page.py`
-- `src/ez_traing/evaluation/engine.py`
-- `src/ez_traing/evaluation/models.py`
-- `src/ez_traing/evaluation/visualization.py`
-- `src/ez_traing/evaluation/report_generator.py`
+- `src/ez_training/pages/eval_page.py`
+- `src/ez_training/evaluation/engine.py`
+- `src/ez_training/evaluation/models.py`
+- `src/ez_training/evaluation/visualization.py`
+- `src/ez_training/evaluation/report_generator.py`
 
 **核心功能：** 使用 YOLO val 进行验证，展示 mAP/Precision/Recall/F1 指标，生成图表，导出 JSON/CSV 报告。
 
@@ -499,8 +499,8 @@
 请对以下验证/评估模块进行全面 Code Review：
 
 涉及文件：
-- src/ez_traing/pages/eval_page.py
-- src/ez_traing/evaluation/ 目录下所有文件
+- src/ez_training/pages/eval_page.py
+- src/ez_training/evaluation/ 目录下所有文件
 
 请重点审查以下方面：
 
@@ -543,7 +543,7 @@
 ## 10. 小工具（YOLO→VOC 转换）
 
 **涉及文件：**
-- `src/ez_traing/pages/tools_page.py`
+- `src/ez_training/pages/tools_page.py`
 
 **核心功能：** 将 YOLO 格式标注转换为 VOC XML 格式。
 
@@ -553,7 +553,7 @@
 请对以下工具模块进行全面 Code Review：
 
 涉及文件：
-- src/ez_traing/pages/tools_page.py
+- src/ez_training/pages/tools_page.py
 
 请重点审查以下方面：
 
@@ -583,7 +583,7 @@
 ## 11. 标注指导文档导出
 
 **涉及文件：**
-- `src/ez_traing/pages/annotation_guide_page.py`
+- `src/ez_training/pages/annotation_guide_page.py`
 
 **核心功能：** 扫描标注数据，按标签抽样裁剪图片，生成包含裁剪图和源信息的 Excel 标注指导文档。
 
@@ -593,7 +593,7 @@
 请对以下标注指导模块进行全面 Code Review：
 
 涉及文件：
-- src/ez_traing/pages/annotation_guide_page.py
+- src/ez_training/pages/annotation_guide_page.py
 
 请重点审查以下方面：
 
@@ -628,7 +628,7 @@
 ## 12. 设置页面
 
 **涉及文件：**
-- `src/ez_traing/pages/settings_page.py`
+- `src/ez_training/pages/settings_page.py`
 
 **核心功能：** 应用版本与更新、GitHub 加速镜像、加样设置、环境信息显示、依赖安装。
 
@@ -638,7 +638,7 @@
 请对以下设置模块进行全面 Code Review：
 
 涉及文件：
-- src/ez_traing/pages/settings_page.py
+- src/ez_training/pages/settings_page.py
 
 请重点审查以下方面：
 
@@ -675,7 +675,7 @@
 ## 13. 自动更新
 
 **涉及文件：**
-- `src/ez_traing/updater.py`
+- `src/ez_training/updater.py`
 
 **核心功能：** 通过 GitHub Releases API 检查新版本、下载 zip 更新包、替换并重启。
 
@@ -685,7 +685,7 @@
 请对以下自动更新模块进行全面 Code Review：
 
 涉及文件：
-- src/ez_traing/updater.py
+- src/ez_training/updater.py
 
 请重点审查以下方面：
 
@@ -721,7 +721,7 @@
 ## 14. 依赖安装
 
 **涉及文件：**
-- `src/ez_traing/dep_installer.py`
+- `src/ez_training/dep_installer.py`
 
 **核心功能：** 在 PyInstaller 打包版中安装 torch 和 ultralytics 到 deps/ 目录。
 
@@ -731,7 +731,7 @@
 请对以下依赖安装模块进行全面 Code Review：
 
 涉及文件：
-- src/ez_traing/dep_installer.py
+- src/ez_training/dep_installer.py
 
 请重点审查以下方面：
 
@@ -762,9 +762,9 @@
 ## 15. UI 主窗口与页面框架
 
 **涉及文件：**
-- `src/ez_traing/ui/main_window.py`
-- `src/ez_traing/ui/painting.py`
-- `src/ez_traing/ui/workers.py`
+- `src/ez_training/ui/main_window.py`
+- `src/ez_training/ui/painting.py`
+- `src/ez_training/ui/workers.py`
 
 **核心功能：** FluentWindow 主窗口、延迟页面加载、ProjectManager 共享、通用绘制和后台线程。
 
@@ -774,9 +774,9 @@
 请对以下 UI 框架模块进行全面 Code Review：
 
 涉及文件：
-- src/ez_traing/ui/main_window.py
-- src/ez_traing/ui/painting.py
-- src/ez_traing/ui/workers.py
+- src/ez_training/ui/main_window.py
+- src/ez_training/ui/painting.py
+- src/ez_training/ui/workers.py
 
 请重点审查以下方面：
 
@@ -816,8 +816,8 @@
 ## 16. 通用模块
 
 **涉及文件：**
-- `src/ez_traing/common/constants.py`
-- `src/ez_traing/__init__.py`
+- `src/ez_training/common/constants.py`
+- `src/ez_training/__init__.py`
 
 **核心功能：** 配置目录管理、设置读写、设备检测、ANSI 清洗、GitHub 镜像、路径打开。
 
@@ -827,13 +827,13 @@
 请对以下通用模块进行全面 Code Review：
 
 涉及文件：
-- src/ez_traing/common/constants.py
-- src/ez_traing/__init__.py
+- src/ez_training/common/constants.py
+- src/ez_training/__init__.py
 
 请重点审查以下方面：
 
 1. **配置管理**
-   - get_config_dir() 创建 ~/.ez_traing 目录的权限处理。
+   - get_config_dir() 创建 ~/.ez_training 目录的权限处理。
    - load_settings() / save_settings() 的并发安全性。
    - 配置文件格式变更时的向后兼容。
    - _DEFAULT_SETTINGS 中默认值的合理性。

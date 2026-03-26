@@ -1,4 +1,4 @@
-"""ReferenceImagePanel 单元测试 - Task 2.2: 图片添加功能"""
+﻿"""ReferenceImagePanel 单元测试 - Task 2.2: 图片添加功能"""
 
 import os
 import sys
@@ -13,7 +13,7 @@ from PyQt5.QtWidgets import QApplication
 # Ensure a QApplication exists for widget tests
 app = QApplication.instance() or QApplication(sys.argv or ["test"])
 
-from ez_traing.pages.prelabeling_page import ReferenceImagePanel
+from ez_training.pages.prelabeling_page import ReferenceImagePanel
 
 
 class TestValidateImage:

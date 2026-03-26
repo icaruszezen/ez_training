@@ -1,4 +1,4 @@
-"""PrelabelingWorker 单元测试"""
+﻿"""PrelabelingWorker 单元测试"""
 
 import os
 from pathlib import Path
@@ -8,8 +8,8 @@ from xml.etree import ElementTree
 import pytest
 from PIL import Image
 
-from ez_traing.prelabeling.engine import PrelabelingWorker, validate_prelabeling_input
-from ez_traing.prelabeling.models import (
+from ez_training.prelabeling.engine import PrelabelingWorker, validate_prelabeling_input
+from ez_training.prelabeling.models import (
     BoundingBox,
     DetectionMode,
     DetectionResult,

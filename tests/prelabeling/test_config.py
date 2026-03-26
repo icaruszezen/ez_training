@@ -1,17 +1,17 @@
-"""APIConfigManager 单元测试"""
+﻿"""APIConfigManager 单元测试"""
 
 import json
 
 import pytest
 
-from ez_traing.prelabeling.config import APIConfigManager
-from ez_traing.prelabeling.models import VisionAPIConfig
+from ez_training.prelabeling.config import APIConfigManager
+from ez_training.prelabeling.models import VisionAPIConfig
 
 
 @pytest.fixture
 def config_dir(tmp_path):
     """提供临时配置目录"""
-    return tmp_path / ".ez_traing"
+    return tmp_path / ".ez_training"
 
 
 @pytest.fixture

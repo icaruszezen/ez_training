@@ -1,4 +1,4 @@
-"""模板匹配引擎回归测试。
+﻿"""模板匹配引擎回归测试。
 
 覆盖:
 - NMS 按标签分组（不同标签不互相抑制，同标签高 IoU 合并）
@@ -11,8 +11,8 @@ import cv2
 import numpy as np
 import pytest
 
-from ez_traing.prelabeling.models import BoundingBox
-from ez_traing.template_matching.matcher import (
+from ez_training.prelabeling.models import BoundingBox
+from ez_training.template_matching.matcher import (
     PreprocessConfig,
     TemplateMatcher,
     TemplateInfo,

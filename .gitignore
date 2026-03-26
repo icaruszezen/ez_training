@@ -1,4 +1,4 @@
-# Byte-compiled / optimized / DLL files
+﻿# Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
 *$py.class
@@ -31,7 +31,7 @@ MANIFEST
 # before PyInstaller builds the exe, so as to inject date/other infos into it.
 *.manifest
 *.spec
-!ez_traing.spec
+!ez_training.spec
 
 # Installer logs
 pip-log.txt
@@ -136,15 +136,15 @@ dmypy.json
 
 # Cython debug symbols
 cython_debug/
-ez_traing.rar
+ez_training.rar
 
 .kiro
 .kiro/*
 
 # User-specific predefined label classes
-src/ez_traing/labeling/data/predefined_classes.txt
+src/ez_training/labeling/data/predefined_classes.txt
 
 # User-created annotation scripts (managed via UI)
-src/ez_traing/annotation_scripts/*.py
-!src/ez_traing/annotation_scripts/__init__.py
-!src/ez_traing/annotation_scripts/voc_utils.py
+src/ez_training/annotation_scripts/*.py
+!src/ez_training/annotation_scripts/__init__.py
+!src/ez_training/annotation_scripts/voc_utils.py
