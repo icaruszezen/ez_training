@@ -19,12 +19,12 @@ datas += collect_data_files("qfluentwidgets", includes=["**/*.qss", "**/*.svg",
                                                          "**/*.json"])
 
 # labeling resources (icons, strings, predefined classes)
-labeling_res = os.path.join(SRC_DIR, "ez_training", "labeling", "resources")
-labeling_data = os.path.join(SRC_DIR, "ez_training", "labeling", "data")
-datas += [
-    (labeling_res, os.path.join("ez_training", "labeling", "resources")),
-    (labeling_data, os.path.join("ez_training", "labeling", "data")),
-]
+for source, target in [
+    (os.path.join(SRC_DIR, "ez_training", "labeling", "resources"), os.path.join("ez_training", "labeling", "resources")),
+    (os.path.join(SRC_DIR, "ez_training", "labeling", "data"), os.path.join("ez_training", "labeling", "data")),
+]:
+    if os.path.exists(source):
+        datas.append((source, target))
 
 # annotation script templates (shipped as data so users can edit them)
 datas += [
