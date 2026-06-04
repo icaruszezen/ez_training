@@ -1,6 +1,7 @@
-﻿"""训练前数据准备主流程。"""
+"""训练前数据准备主流程。"""
 
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 import os
 import re
 import shutil
@@ -23,9 +24,12 @@ from ez_training.data_prep.converter import (
     parse_voc_boxes,
     read_voc_image_size,
     save_classes,
+    write_voc_annotation,
     write_yolo_label,
 )
 from ez_training.data_prep.models import (
+    EXPORT_FORMAT_VOC,
+    EXPORT_FORMAT_YOLO,
     IMAGE_EXPORT_RULE_EXCLUDE_IF_ANY_UNSELECTED,
     DataPrepConfig,
     DataPrepSummary,
@@ -33,6 +37,17 @@ from ez_training.data_prep.models import (
     load_custom_class_names,
 )
 from ez_training.data_prep.splitter import split_train_val
+
+
+@dataclass
+class _PreparedOutputDirs:
+    yolo_image_train_dir: Optional[Path] = None
+    yolo_image_val_dir: Optional[Path] = None
+    yolo_label_train_dir: Optional[Path] = None
+    yolo_label_val_dir: Optional[Path] = None
+    voc_image_dir: Optional[Path] = None
+    voc_annotation_dir: Optional[Path] = None
+    voc_image_set_dir: Optional[Path] = None
 
 
 class DataPrepPipeline:
@@ -50,6 +65,10 @@ class DataPrepPipeline:
         started_at = perf_counter()
         self.config.validate()
         self._log(log_callback, f"开始数据准备: {self.config.dataset_name}")
+        self._log(
+            log_callback,
+            f"输出格式: {'Pascal VOC' if self.config.export_format == EXPORT_FORMAT_VOC else 'YOLO'}",
+        )
 
         dataset_roots = []
         if self.config.dataset_dirs:
@@ -78,9 +97,23 @@ class DataPrepPipeline:
                     f"覆盖模式下可能删除源数据。请选择其他输出目录。"
                 )
 
-        img_train_dir, img_val_dir, label_train_dir, label_val_dir = self._prepare_output_dirs(
-            output_root, self.config.overwrite_output
-        )
+        prepared_dirs = self._prepare_output_dirs(output_root, self.config.overwrite_output)
+        if self.config.export_format == EXPORT_FORMAT_VOC:
+            image_train_dir = image_val_dir = prepared_dirs.voc_image_dir
+            label_train_dir = label_val_dir = prepared_dirs.voc_annotation_dir
+        else:
+            image_train_dir = prepared_dirs.yolo_image_train_dir
+            image_val_dir = prepared_dirs.yolo_image_val_dir
+            label_train_dir = prepared_dirs.yolo_label_train_dir
+            label_val_dir = prepared_dirs.yolo_label_val_dir
+
+        if (
+            image_train_dir is None
+            or image_val_dir is None
+            or label_train_dir is None
+            or label_val_dir is None
+        ):
+            raise RuntimeError("输出目录初始化失败")
 
         scan_started_at = perf_counter()
         all_samples = []
@@ -187,11 +220,16 @@ class DataPrepPipeline:
         done_steps = 0
 
         used_train_names: Set[str] = set()
-        used_val_names: Set[str] = set()
+        used_val_names: Set[str] = (
+            used_train_names if self.config.export_format == EXPORT_FORMAT_VOC else set()
+        )
+        train_exported_names: List[str] = []
+        val_exported_names: List[str] = []
 
         summary = DataPrepSummary(
             dataset_name=self.config.dataset_name,
             output_dir=str(output_root),
+            export_format=self.config.export_format,
             source_images=source_images,
             skipped_images=skipped_images,
             classes_count=len(class_names),
@@ -204,11 +242,13 @@ class DataPrepPipeline:
             summary.train_images, summary.augmented_images, done_steps = self._export_split(
                 split_name="train",
                 samples=train_samples,
-                image_dir=img_train_dir,
+                image_dir=image_train_dir,
                 label_dir=label_train_dir,
                 used_names=used_train_names,
                 dataset_roots=dataset_roots,
+                export_format=self.config.export_format,
                 class_to_id=class_to_id,
+                exported_names=train_exported_names,
                 do_augment=aug_enabled,
                 progress_total=total_steps,
                 progress_done=done_steps,
@@ -223,11 +263,13 @@ class DataPrepPipeline:
             val_images, val_aug_count, done_steps = self._export_split(
                 split_name="val",
                 samples=val_samples,
-                image_dir=img_val_dir,
+                image_dir=image_val_dir,
                 label_dir=label_val_dir,
                 used_names=used_val_names,
                 dataset_roots=dataset_roots,
+                export_format=self.config.export_format,
                 class_to_id=class_to_id,
+                exported_names=val_exported_names,
                 do_augment=aug_enabled and self.config.augment_scope == "both",
                 progress_total=total_steps,
                 progress_done=done_steps,
@@ -249,12 +291,28 @@ class DataPrepPipeline:
         classes_path = output_root / "classes.txt"
         save_classes(classes_path, class_names)
 
-        yaml_path = output_root / "data.yaml"
-        self._save_data_yaml(yaml_path, output_root, class_names)
-
         summary.processed_images = summary.train_images + summary.val_images
-        summary.yaml_path = str(yaml_path)
         summary.classes_path = str(classes_path)
+        if self.config.export_format == EXPORT_FORMAT_YOLO:
+            yaml_path = output_root / "data.yaml"
+            self._save_data_yaml(yaml_path, output_root, class_names)
+            summary.yaml_path = str(yaml_path)
+            self._log(log_callback, f"已生成 data.yaml: {yaml_path}")
+        else:
+            if prepared_dirs.voc_image_set_dir is None:
+                raise RuntimeError("VOC 索引目录初始化失败")
+            train_list_path, val_list_path, trainval_list_path = self._save_voc_image_sets(
+                prepared_dirs.voc_image_set_dir,
+                train_exported_names,
+                val_exported_names,
+            )
+            summary.train_list_path = str(train_list_path)
+            summary.val_list_path = str(val_list_path)
+            summary.trainval_list_path = str(trainval_list_path)
+            self._log(
+                log_callback,
+                f"已生成 VOC 划分文件: train={train_list_path}, val={val_list_path}",
+            )
 
         clear_voc_cache()
 
@@ -331,22 +389,47 @@ class DataPrepPipeline:
 
     def _prepare_output_dirs(
         self, output_root: Path, overwrite_output: bool
-    ) -> Tuple[Path, Path, Path, Path]:
+    ) -> _PreparedOutputDirs:
+        managed_paths = [
+            output_root / "images",
+            output_root / "labels",
+            output_root / "JPEGImages",
+            output_root / "Annotations",
+            output_root / "ImageSets",
+            output_root / "classes.txt",
+            output_root / "data.yaml",
+        ]
+        existing_outputs = [
+            path.relative_to(output_root).as_posix()
+            for path in managed_paths
+            if path.exists()
+        ]
+
         if output_root.exists() and overwrite_output:
-            for path in [
-                output_root / "images",
-                output_root / "labels",
-                output_root / "classes.txt",
-                output_root / "data.yaml",
-            ]:
+            for path in managed_paths:
                 if path.is_dir():
                     shutil.rmtree(path, ignore_errors=True)
                 elif path.exists():
                     path.unlink(missing_ok=True)
 
-        if output_root.exists() and not overwrite_output:
-            if (output_root / "images").exists() or (output_root / "labels").exists():
-                raise ValueError("输出目录已包含 images/labels，请勾选“覆盖输出目录”或更换目录")
+        if output_root.exists() and not overwrite_output and existing_outputs:
+            raise ValueError(
+                "输出目录已包含旧结果（"
+                + ", ".join(existing_outputs)
+                + "），请勾选“覆盖输出目录”或更换目录"
+            )
+
+        if self.config.export_format == EXPORT_FORMAT_VOC:
+            voc_image_dir = output_root / "JPEGImages"
+            voc_annotation_dir = output_root / "Annotations"
+            voc_image_set_dir = output_root / "ImageSets" / "Main"
+            for d in [voc_image_dir, voc_annotation_dir, voc_image_set_dir]:
+                d.mkdir(parents=True, exist_ok=True)
+            return _PreparedOutputDirs(
+                voc_image_dir=voc_image_dir,
+                voc_annotation_dir=voc_annotation_dir,
+                voc_image_set_dir=voc_image_set_dir,
+            )
 
         img_train_dir = output_root / "images" / "train"
         img_val_dir = output_root / "images" / "val"
@@ -355,7 +438,12 @@ class DataPrepPipeline:
         for d in [img_train_dir, img_val_dir, label_train_dir, label_val_dir]:
             d.mkdir(parents=True, exist_ok=True)
 
-        return img_train_dir, img_val_dir, label_train_dir, label_val_dir
+        return _PreparedOutputDirs(
+            yolo_image_train_dir=img_train_dir,
+            yolo_image_val_dir=img_val_dir,
+            yolo_label_train_dir=label_train_dir,
+            yolo_label_val_dir=label_val_dir,
+        )
 
     def _estimate_total_steps(self, train_count: int, val_count: int, aug_enabled: bool) -> int:
         base = train_count + val_count
@@ -423,7 +511,9 @@ class DataPrepPipeline:
         label_dir: Path,
         used_names: Set[str],
         dataset_roots: List[Path],
+        export_format: str,
         class_to_id: Dict[str, int],
+        exported_names: List[str],
         do_augment: bool,
         progress_total: int,
         progress_done: int,
@@ -449,6 +539,7 @@ class DataPrepPipeline:
 
                 width = sample.image_width
                 height = sample.image_height
+                depth = self._infer_image_depth(sample.image_mode)
 
                 base_stem = self._unique_stem(
                     self._make_stem(sample.image_path, dataset_roots), used_names
@@ -458,8 +549,6 @@ class DataPrepPipeline:
                     base_ext = ".jpg"
 
                 out_img = image_dir / f"{base_stem}{base_ext}"
-                out_lbl = label_dir / f"{base_stem}.txt"
-
                 shutil.copy2(sample.image_path, out_img)
 
                 image_array = None
@@ -468,12 +557,28 @@ class DataPrepPipeline:
                     with Image.open(sample.image_path) as pil_img:
                         if width is None or height is None:
                             width, height = pil_img.size
+                        depth = self._infer_image_depth(pil_img.mode)
                         if do_augment:
                             image_array = np.array(pil_img.convert("RGB"))
 
                 if width is None or height is None:
                     raise ValueError(f"无法获取图片尺寸: {sample.image_path}")
-                write_yolo_label(out_lbl, sample.boxes, class_to_id, width, height)
+
+                if export_format == EXPORT_FORMAT_VOC:
+                    out_lbl = label_dir / f"{base_stem}.xml"
+                    write_voc_annotation(
+                        out_lbl,
+                        out_img,
+                        sample.boxes,
+                        width,
+                        height,
+                        depth=depth,
+                    )
+                else:
+                    out_lbl = label_dir / f"{base_stem}.txt"
+                    write_yolo_label(out_lbl, sample.boxes, class_to_id, width, height)
+
+                exported_names.append(base_stem)
                 output_count += 1
 
                 progress_done += 1
@@ -521,11 +626,23 @@ class DataPrepPipeline:
 
                     aug_stem = self._unique_stem(f"{base_stem}_aug{idx + 1}", used_names)
                     aug_img_path = image_dir / f"{aug_stem}.jpg"
-                    aug_lbl_path = label_dir / f"{aug_stem}.txt"
                     Image.fromarray(aug_image).save(aug_img_path)
                     h, w = aug_image.shape[:2]
-                    write_yolo_label(aug_lbl_path, aug_boxes, class_to_id, w, h)
+                    if export_format == EXPORT_FORMAT_VOC:
+                        aug_lbl_path = label_dir / f"{aug_stem}.xml"
+                        write_voc_annotation(
+                            aug_lbl_path,
+                            aug_img_path,
+                            aug_boxes,
+                            w,
+                            h,
+                            depth=3,
+                        )
+                    else:
+                        aug_lbl_path = label_dir / f"{aug_stem}.txt"
+                        write_yolo_label(aug_lbl_path, aug_boxes, class_to_id, w, h)
 
+                    exported_names.append(aug_stem)
                     output_count += 1
                     aug_count += 1
                     progress_done += 1
@@ -611,6 +728,28 @@ class DataPrepPipeline:
         with open(yaml_path, "w", encoding="utf-8") as f:
             yaml.dump(data_config, f, allow_unicode=True, default_flow_style=False)
 
+    def _save_voc_image_sets(
+        self,
+        image_set_dir: Path,
+        train_names: List[str],
+        val_names: List[str],
+    ) -> Tuple[Path, Path, Path]:
+        image_set_dir.mkdir(parents=True, exist_ok=True)
+        train_list_path = image_set_dir / "train.txt"
+        val_list_path = image_set_dir / "val.txt"
+        trainval_list_path = image_set_dir / "trainval.txt"
+
+        self._write_name_list(train_list_path, train_names)
+        self._write_name_list(val_list_path, val_names)
+        self._write_name_list(trainval_list_path, train_names + val_names)
+        return train_list_path, val_list_path, trainval_list_path
+
+    @staticmethod
+    def _write_name_list(path: Path, names: List[str]) -> None:
+        with open(path, "w", encoding="utf-8") as f:
+            if names:
+                f.write("\n".join(names) + "\n")
+
     def _emit_progress(
         self,
         callback: Optional[Callable[[int, str], None]],
@@ -623,7 +762,7 @@ class DataPrepPipeline:
     @staticmethod
     def _cleanup_partial_output(output_root: Path) -> None:
         """清理中断导出产生的不完整文件，保留输出根目录本身。"""
-        for sub in ["images", "labels"]:
+        for sub in ["images", "labels", "JPEGImages", "Annotations", "ImageSets"]:
             target = output_root / sub
             if target.is_dir():
                 shutil.rmtree(target, ignore_errors=True)
@@ -631,6 +770,16 @@ class DataPrepPipeline:
             target = output_root / name
             if target.exists():
                 target.unlink(missing_ok=True)
+
+    @staticmethod
+    def _infer_image_depth(mode: Optional[str]) -> int:
+        if not mode:
+            return 3
+        normalized = mode.upper()
+        if normalized == "1":
+            return 1
+        depth = sum(1 for ch in normalized if ch.isalpha())
+        return max(1, depth or 1)
 
     @staticmethod
     def _is_subpath(child: Path, parent: Path) -> bool:

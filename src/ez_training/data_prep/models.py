@@ -4,6 +4,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional, Union
 
+EXPORT_FORMAT_YOLO = "yolo"
+EXPORT_FORMAT_VOC = "voc"
+VALID_EXPORT_FORMATS = {
+    EXPORT_FORMAT_YOLO,
+    EXPORT_FORMAT_VOC,
+}
+
 IMAGE_EXPORT_RULE_EXCLUDE_IF_ANY_UNSELECTED = "exclude_if_any_unselected"
 IMAGE_EXPORT_RULE_INCLUDE_IF_ANY_SELECTED = "include_if_any_selected"
 VALID_IMAGE_EXPORT_RULES = {
@@ -49,6 +56,7 @@ class DataPrepConfig:
     dataset_name: str
     dataset_dir: str
     output_dir: str
+    export_format: str = EXPORT_FORMAT_YOLO
     train_ratio: float = 0.8
     random_seed: int = 42
     augment_methods: List[str] = field(default_factory=list)
@@ -69,6 +77,8 @@ class DataPrepConfig:
             raise ValueError("数据集目录不能为空")
         if not self.output_dir.strip():
             raise ValueError("输出目录不能为空")
+        if self.export_format not in VALID_EXPORT_FORMATS:
+            raise ValueError(f"不支持的输出格式: {self.export_format}")
         if not (0.0 < self.train_ratio < 1.0):
             raise ValueError("训练集比例必须在 0 到 1 之间")
         if self.augment_scope not in {"train", "both"}:
@@ -107,6 +117,7 @@ class DataPrepSummary:
 
     dataset_name: str
     output_dir: str
+    export_format: str = EXPORT_FORMAT_YOLO
     source_images: int = 0
     processed_images: int = 0
     train_images: int = 0
@@ -116,3 +127,6 @@ class DataPrepSummary:
     classes_count: int = 0
     yaml_path: str = ""
     classes_path: str = ""
+    train_list_path: str = ""
+    val_list_path: str = ""
+    trainval_list_path: str = ""

@@ -48,11 +48,17 @@ pip install -r requirements.txt
 python src/ez_training/main.py
 ```
 
-### 打包版（exe）
+### Windows 安装包
 
-直接运行 `ez_training.exe`。首次使用需要安装 PyTorch 和 Ultralytics——运行 exe 同目录下的 `install_deps.bat`，按提示选 CUDA 版本就行。
+从 GitHub Releases 下载 `EZ-Training-Setup-vX.Y.Z.exe`，运行后会安装到系统应用目录，并创建开始菜单快捷方式。安装完成后可以直接启动 `EZ Training`。
 
-程序会自动检查 GitHub Releases 上的新版本。
+训练和验证功能首次使用前仍需要安装 PyTorch 和 Ultralytics：在开始菜单运行“安装训练依赖”，或到安装目录运行 `install_deps.bat`，按提示选择 CUDA / CPU 版本。
+
+### 便携版（zip）
+
+从 GitHub Releases 下载 `ez_training-vX.Y.Z-windows.zip`，解压后直接运行 `ez_training.exe`。首次使用训练和验证功能前，运行 exe 同目录下的 `install_deps.bat`，按提示选择 CUDA / CPU 版本。
+
+程序会自动检查 GitHub Releases 上的新版本。安装到 `Program Files` 等系统目录时，自动覆盖更新可能需要管理员权限；遇到权限问题时，建议下载新版安装包重新安装，或使用便携版。
 
 ## 基本流程
 

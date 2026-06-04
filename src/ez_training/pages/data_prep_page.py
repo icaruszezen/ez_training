@@ -34,6 +34,8 @@ from qfluentwidgets import (
 from ez_training.common.constants import get_config_dir, open_path
 from ez_training.data_prep.augmentation import get_augmentation_specs, is_albumentations_available
 from ez_training.data_prep.models import (
+    EXPORT_FORMAT_VOC,
+    EXPORT_FORMAT_YOLO,
     IMAGE_EXPORT_RULE_EXCLUDE_IF_ANY_UNSELECTED,
     IMAGE_EXPORT_RULE_INCLUDE_IF_ANY_SELECTED,
     DataPrepConfig,
@@ -86,6 +88,7 @@ class DataPrepPage(QWidget):
 
     _STATE_FILE = "data_prep_ui_state.json"
     _DEFAULT_AUG_METHODS = {"hflip", "brightness_contrast", "gauss_noise"}
+    _DEFAULT_EXPORT_FORMAT = EXPORT_FORMAT_YOLO
     _DEFAULT_IMAGE_EXPORT_RULE = IMAGE_EXPORT_RULE_EXCLUDE_IF_ANY_UNSELECTED
 
     _AUGMENTATION_HELP_TEXTS: Dict[str, str] = {
@@ -319,11 +322,21 @@ class DataPrepPage(QWidget):
         row.addWidget(self.browse_output_btn)
         layout.addLayout(row)
 
+        export_format_row = QHBoxLayout()
+        export_format_row.addWidget(BodyLabel("输出格式", card))
+        self.export_format_combo = ComboBox(card)
+        self.export_format_combo.addItem("YOLO", userData=EXPORT_FORMAT_YOLO)
+        self.export_format_combo.addItem("Pascal VOC", userData=EXPORT_FORMAT_VOC)
+        self.export_format_combo.currentIndexChanged.connect(self._on_export_format_changed)
+        export_format_row.addWidget(self.export_format_combo)
+        export_format_row.addStretch()
+        layout.addLayout(export_format_row)
+
         self.skip_unlabeled_cb = CheckBox("仅处理有 VOC 标注的图片（跳过无标注）", card)
         self.skip_unlabeled_cb.setChecked(True)
         layout.addWidget(self.skip_unlabeled_cb)
 
-        self.overwrite_cb = CheckBox("覆盖输出目录中的旧结果（images/labels/data.yaml/classes.txt）", card)
+        self.overwrite_cb = CheckBox("", card)
         self.overwrite_cb.setChecked(True)
         layout.addWidget(self.overwrite_cb)
 
@@ -344,9 +357,7 @@ class DataPrepPage(QWidget):
         classes_row.addWidget(self.browse_classes_btn)
         layout.addLayout(classes_row)
 
-        self.custom_classes_hint = CaptionLabel(
-            "文件每行一个类别名称，类别顺序将决定 YOLO 标注中的 class_id", card
-        )
+        self.custom_classes_hint = CaptionLabel("", card)
         self.custom_classes_hint.setEnabled(False)
         layout.addWidget(self.custom_classes_hint)
 
@@ -405,6 +416,7 @@ class DataPrepPage(QWidget):
 
         self.custom_classes_options_widget.setVisible(False)
         layout.addWidget(self.custom_classes_options_widget)
+        self._update_output_format_ui()
 
         return card
 
@@ -557,6 +569,38 @@ class DataPrepPage(QWidget):
     def _selected_methods(self) -> List[str]:
         return [key for key, cb in self._method_checkboxes.items() if cb.isChecked()]
 
+    def _get_export_format(self) -> str:
+        export_format = self.export_format_combo.currentData()
+        if export_format in {EXPORT_FORMAT_YOLO, EXPORT_FORMAT_VOC}:
+            return export_format
+        return self._DEFAULT_EXPORT_FORMAT
+
+    def _set_export_format(self, export_format: str) -> None:
+        for idx in range(self.export_format_combo.count()):
+            if self.export_format_combo.itemData(idx) == export_format:
+                self.export_format_combo.setCurrentIndex(idx)
+                return
+        self.export_format_combo.setCurrentIndex(0)
+
+    def _on_export_format_changed(self) -> None:
+        self._update_output_format_ui()
+
+    def _update_output_format_ui(self) -> None:
+        export_format = self._get_export_format()
+        if export_format == EXPORT_FORMAT_VOC:
+            self.overwrite_cb.setText(
+                "覆盖输出目录中的旧结果（JPEGImages/Annotations/ImageSets/classes.txt）"
+            )
+        else:
+            self.overwrite_cb.setText(
+                "覆盖输出目录中的旧结果（images/labels/data.yaml/classes.txt）"
+            )
+
+        self.custom_classes_hint.setText(
+            "文件每行一个类别名称，类别顺序将决定导出结果中的类别顺序；"
+            "YOLO 模式下同时决定标注中的 class_id"
+        )
+
     def _bind_persistence_signals(self) -> None:
         self.train_ratio_spin.valueChanged.connect(self._save_ui_state)
         self.seed_spin.valueChanged.connect(self._save_ui_state)
@@ -564,6 +608,7 @@ class DataPrepPage(QWidget):
         self.aug_count_spin.valueChanged.connect(self._save_ui_state)
         self.aug_scope_combo.currentIndexChanged.connect(self._save_ui_state)
         self.output_dir_edit.textChanged.connect(self._save_ui_state)
+        self.export_format_combo.currentIndexChanged.connect(self._save_ui_state)
         self.skip_unlabeled_cb.toggled.connect(self._save_ui_state)
         self.overwrite_cb.toggled.connect(self._save_ui_state)
         for cb in self._method_checkboxes.values():
@@ -799,6 +844,7 @@ class DataPrepPage(QWidget):
             output_dir = state.get("output_dir")
             if isinstance(output_dir, str) and output_dir.strip():
                 self.output_dir_edit.setText(output_dir.strip())
+            self._set_export_format(str(state.get("export_format", self._DEFAULT_EXPORT_FORMAT)))
 
             self.skip_unlabeled_cb.setChecked(
                 self._safe_bool(state.get("skip_unlabeled"), default=True)
@@ -833,6 +879,7 @@ class DataPrepPage(QWidget):
 
         self._update_ratio_hint()
         self._update_aug_hint()
+        self._on_export_format_changed()
         self._on_aug_toggled(self.enable_aug_cb.isChecked())
         self._on_custom_classes_toggled(self.custom_classes_cb.isChecked())
 
@@ -851,6 +898,7 @@ class DataPrepPage(QWidget):
             "augment_scope": self._get_aug_scope(),
             "augment_methods": self._selected_methods(),
             "output_dir": self.output_dir_edit.text().strip(),
+            "export_format": self._get_export_format(),
             "skip_unlabeled": self.skip_unlabeled_cb.isChecked(),
             "overwrite_output": self.overwrite_cb.isChecked(),
             "use_custom_classes": self.custom_classes_cb.isChecked(),
@@ -1001,6 +1049,7 @@ class DataPrepPage(QWidget):
             dataset_name=project.name,
             dataset_dir=dirs[0] if dirs else "",
             output_dir=output_dir,
+            export_format=self._get_export_format(),
             train_ratio=self.train_ratio_spin.value() / 100.0,
             random_seed=self.seed_spin.value(),
             augment_methods=methods,
@@ -1054,9 +1103,17 @@ class DataPrepPage(QWidget):
             self.progress_label.setText(
                 f"完成: train={summary.train_images}, val={summary.val_images}, 增强={summary.augmented_images}"
             )
+            if summary.export_format == EXPORT_FORMAT_VOC:
+                artifact_text = (
+                    f"VOC train={summary.train_list_path}, val={summary.val_list_path}"
+                    if summary.train_list_path
+                    else "VOC 划分文件已生成"
+                )
+            else:
+                artifact_text = f"YAML={summary.yaml_path}"
             self._log(
                 f"完成: 输出 {summary.processed_images} 张, 类别 {summary.classes_count} 个, "
-                f"YAML={summary.yaml_path}"
+                f"{artifact_text}"
             )
             InfoBar.success(
                 title="数据准备完成",
@@ -1093,6 +1150,7 @@ class DataPrepPage(QWidget):
         self.aug_methods_container.setEnabled(not running and self.enable_aug_cb.isChecked())
         self.output_dir_edit.setEnabled(not running)
         self.browse_output_btn.setEnabled(not running)
+        self.export_format_combo.setEnabled(not running)
         self.skip_unlabeled_cb.setEnabled(not running)
         self.overwrite_cb.setEnabled(not running)
         self.custom_classes_cb.setEnabled(not running)

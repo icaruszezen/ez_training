@@ -6,7 +6,12 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
-from ez_training.common.voc_io import parse_voc_size
+from ez_training.common.voc_io import (
+    append_voc_object,
+    create_voc_xml,
+    parse_voc_size,
+    save_voc_xml,
+)
 from ez_training.data_prep.models import AnnotationBox, DatasetSample
 
 logger = logging.getLogger(__name__)
@@ -192,3 +197,44 @@ def write_yolo_label(
     with open(label_path, "w", encoding="utf-8") as f:
         if lines:
             f.write("\n".join(lines) + "\n")
+
+
+def write_voc_annotation(
+    xml_path: Path,
+    image_path: Path,
+    boxes: List[AnnotationBox],
+    image_width: int,
+    image_height: int,
+    depth: int = 3,
+) -> None:
+    """Write boxes to a Pascal VOC XML annotation file."""
+    xml_path.parent.mkdir(parents=True, exist_ok=True)
+    root = create_voc_xml(
+        folder=image_path.parent.name,
+        filename=image_path.name,
+        path=str(image_path),
+        width=image_width,
+        height=image_height,
+        depth=max(1, int(depth)),
+    )
+
+    for box in boxes:
+        xmin = max(0, min(int(round(box.x_min)), image_width))
+        ymin = max(0, min(int(round(box.y_min)), image_height))
+        xmax = max(0, min(int(round(box.x_max)), image_width))
+        ymax = max(0, min(int(round(box.y_max)), image_height))
+        if xmax <= xmin or ymax <= ymin:
+            continue
+
+        append_voc_object(
+            root,
+            box.label,
+            xmin,
+            ymin,
+            xmax,
+            ymax,
+            img_width=image_width,
+            img_height=image_height,
+        )
+
+    save_voc_xml(root, xml_path)
