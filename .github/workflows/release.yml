@@ -50,6 +50,16 @@ jobs:
         if: steps.check_tag.outputs.exists == 'false'
         run: choco install innosetup --no-progress -y
 
+      - name: Install Inno Setup Chinese language
+        if: steps.check_tag.outputs.exists == 'false'
+        shell: pwsh
+        run: |
+          $languageDir = "${env:ProgramFiles(x86)}\Inno Setup 6\Languages"
+          New-Item -ItemType Directory -Force -Path $languageDir | Out-Null
+          Invoke-WebRequest `
+            -Uri "https://raw.githubusercontent.com/jrsoftware/issrc/main/Files/Languages/Unofficial/ChineseSimplified.isl" `
+            -OutFile "$languageDir\ChineseSimplified.isl"
+
       - name: Build with PyInstaller
         if: steps.check_tag.outputs.exists == 'false'
         run: pyinstaller ez_training.spec
